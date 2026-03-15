@@ -1,0 +1,38 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Kennel App",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "debugAdapter": "dlv-dap",
+            "program": "${workspaceFolder}/cmd/app",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug Current File",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "debugAdapter": "dlv-dap",
+            "program": "${file}",
+            "cwd": "${fileDirname}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug Current Package",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "debugAdapter": "dlv-dap",
+            "program": "${fileDirname}",
+            "cwd": "${fileDirname}",
+            "console": "integratedTerminal"
+        }
+    ]
+}
