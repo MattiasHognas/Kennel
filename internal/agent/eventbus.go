@@ -23,19 +23,21 @@ func NewEventBus() *EventBus {
 
 func (eb *EventBus) Publish(topic string, event Event) {
 	eb.mu.RLock()
-	defer eb.mu.RUnlock()
 	subscribers := append([]EventChan{}, eb.subscribers[topic]...)
-	go func() {
-		for _, subscriber := range subscribers {
-			subscriber <- event
+	eb.mu.RUnlock()
+
+	for _, subscriber := range subscribers {
+		select {
+		case subscriber <- event:
+		default:
 		}
-	}()
+	}
 }
 
 func (eb *EventBus) Subscribe(topic string) EventChan {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
-	ch := make(EventChan)
+	ch := make(EventChan, 16)
 	eb.subscribers[topic] = append(eb.subscribers[topic], ch)
 	return ch
 }
@@ -47,10 +49,6 @@ func (eb *EventBus) Unsubscribe(topic string, ch EventChan) {
 		for i, subscriber := range subscribers {
 			if ch == subscriber {
 				eb.subscribers[topic] = append(subscribers[:i], subscribers[i+1:]...)
-				close(ch)
-				// Drain the channel
-				for range ch {
-				}
 				return
 			}
 		}
