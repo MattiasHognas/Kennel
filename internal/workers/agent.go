@@ -1,6 +1,7 @@
 package agent
 
 import (
+	eventbus "MattiasHognas/Kennel/internal/events"
 	"fmt"
 	"sync"
 	"time"
@@ -22,19 +23,19 @@ const (
 
 type AgentContract interface {
 	Name() string
-	Run() EventChan
+	Run() eventbus.EventChan
 	Pause() AgentState
 	Stop() AgentState
 	State() AgentState
-	SubscribeActivity() EventChan
+	SubscribeActivity() eventbus.EventChan
 }
 
 type Agent struct {
 	mu         sync.RWMutex
 	name       string
 	state      AgentState
-	eventBus   *EventBus
-	activityCh EventChan
+	eventBus   *eventbus.EventBus
+	activityCh eventbus.EventChan
 	stopCh     chan struct{}
 	started    bool
 	tick       time.Duration
@@ -47,7 +48,7 @@ func (a *Agent) Name() string {
 	return a.name
 }
 
-func (a *Agent) Run() EventChan {
+func (a *Agent) Run() eventbus.EventChan {
 	a.mu.Lock()
 	if !a.started {
 		a.started = true
@@ -70,7 +71,7 @@ func (a *Agent) Pause() AgentState {
 	}
 
 	a.state = Paused
-	a.eventBus.Publish(activityTopic, Event{Payload: "paused"})
+	a.eventBus.Publish(activityTopic, eventbus.Event{Payload: "paused"})
 	return a.state
 }
 
@@ -95,7 +96,7 @@ func (a *Agent) State() AgentState {
 	return a.state
 }
 
-func (a *Agent) SubscribeActivity() EventChan {
+func (a *Agent) SubscribeActivity() eventbus.EventChan {
 	return a.activityCh
 }
 
@@ -115,7 +116,7 @@ func NewAgent(name string) AgentContract {
 		name = defaultName
 	}
 
-	eventBus := NewEventBus()
+	eventBus := eventbus.NewEventBus()
 
 	return &Agent{
 		name:       name,
@@ -145,11 +146,11 @@ func (a *Agent) loop(stopCh chan struct{}) {
 			sequence := a.sequence
 			a.mu.Unlock()
 
-			a.eventBus.Publish(activityTopic, Event{Payload: fmt.Sprintf("reported activity %d", sequence)})
+			a.eventBus.Publish(activityTopic, eventbus.Event{Payload: fmt.Sprintf("reported activity %d", sequence)})
 		}
 	}
 }
 
 func (a *Agent) publishActivity(action string) {
-	a.eventBus.Publish(activityTopic, Event{Payload: action})
+	a.eventBus.Publish(activityTopic, eventbus.Event{Payload: action})
 }
