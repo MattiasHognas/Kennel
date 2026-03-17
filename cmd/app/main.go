@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"os"
 
 	repository "MattiasHognas/Kennel/internal/data"
 	logic "MattiasHognas/Kennel/internal/logic"
@@ -28,8 +27,7 @@ func main() {
 	cleanup()
 
 	if err != nil {
-		fmt.Printf("Alas, there's been an error: %v", err)
-		os.Exit(1)
+		panic(fmt.Sprintf("Something broke: %v", err))
 	}
 }
 
@@ -37,9 +35,7 @@ func initialModel() (logic.Model, func()) {
 	focusedStyles, blurredStyles := newTableStyles()
 	repository, err := repository.NewSQLiteRepository("data/kennel.db")
 	if err != nil {
-		fatalErr := fmt.Sprintf("Failed to initialize repository: %v", err)
-		fmt.Println(fatalErr)
-		os.Exit(1)
+		panic(fmt.Sprintf("Failed to initialize repository: %v", err))
 	}
 	sampleProjects := loadProjects(repository)
 	m := logic.NewModel(focusedStyles, blurredStyles, sampleProjects, repository)
@@ -130,27 +126,24 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
 	storedProjects, err := repository.ReadProjects()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read projects, falling back to samples: %v\n", err)
 		_ = repository.Close()
-		return sampleProjects()
+		panic(fmt.Sprintf("Failed to read projects, falling back to samples: %v\n", err))
 	}
 
 	if len(storedProjects) == 0 {
 		if err := seedSampleProjects(repository); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to seed sample projects, falling back to samples: %v\n", err)
 			_ = repository.Close()
-			return sampleProjects()
+			panic(fmt.Sprintf("Failed to seed sample projects, falling back to samples: %v\n", err))
 		}
 
 		storedProjects, err = repository.ReadProjects()
 		if err != nil || len(storedProjects) == 0 {
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to read seeded projects, falling back to samples: %v\n", err)
-			} else {
-				fmt.Fprintf(os.Stderr, "failed to read seeded projects (empty), falling back to samples\n")
-			}
 			_ = repository.Close()
-			return sampleProjects()
+			if err != nil {
+				panic(fmt.Sprintf("Failed to read seeded projects, falling back to samples: %v\n", err))
+			} else {
+				panic("Failed to read seeded projects (empty), falling back to samples\n")
+			}
 		}
 	}
 
