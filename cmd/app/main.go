@@ -170,7 +170,7 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 			Name:         storedProject.Name,
 			Workplace:    storedProject.Workplace,
 			Instructions: storedProject.Instructions,
-			State:        agent.Stopped,
+			State:        restoreState(storedProject.State),
 			Agents:       agents,
 			AgentIDs:     agentIDs,
 			Activities:   activities,
@@ -205,8 +205,22 @@ func seedSampleProjects(repository *repository.SQLiteRepository) error {
 
 func restoreAgentState(name string, persistedState string) agent.AgentContract {
 	a := agent.NewAgent(name)
-	if persistedState == agent.Running.String() {
+	switch persistedState {
+	case agent.Running.String():
 		a.Run()
+	case agent.Completed.String():
+		a.Complete()
 	}
 	return a
+}
+
+func restoreState(persistedState string) agent.AgentState {
+	switch persistedState {
+	case agent.Running.String():
+		return agent.Running
+	case agent.Completed.String():
+		return agent.Completed
+	default:
+		return agent.Stopped
+	}
 }

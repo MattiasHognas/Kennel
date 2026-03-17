@@ -136,13 +136,12 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 			),
 			toggleProject: key.NewBinding(
 				key.WithKeys("space"),
-				key.WithHelp("space", "toggle project"),
+				key.WithHelp("space", "cycle state"),
 			),
 		},
 	}
 
 	m.Sources = m.BuildActivitySources()
-	m.syncAllProjectStates()
 	m.refreshProjectTable()
 	m.refreshSelectedProjectTables()
 	m.resizeProjectEditor()
@@ -302,7 +301,7 @@ func (m Model) View() tea.View {
 		"",
 		lipgloss.JoinHorizontal(lipgloss.Top, m.tableViews()...),
 		"",
-		"tab/shift+tab switches tables, enter edits the selected project, space toggles it, s starts, p stops.",
+		"tab/shift+tab switches tables, enter edits the selected project, space cycles state, s starts, p stops.",
 		"Activities come from agents and are shown for the currently selected project.",
 	)
 
@@ -488,11 +487,12 @@ func (m *Model) selectedProjectWorkplaceSummary() string {
 func (m *Model) startSelectedProject() {
 	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
-	if project == nil || project.State == agent.Running {
+	if project == nil || project.State == agent.Running || project.State == agent.Completed {
 		return
 	}
 	if len(project.Agents) == 0 {
 		project.State = agent.Running
+		m.persistProjectState(project)
 		m.refreshProjectAndSelection(projectIndex)
 		return
 	}
@@ -500,6 +500,8 @@ func (m *Model) startSelectedProject() {
 	for _, agentInstance := range project.Agents {
 		agentInstance.Run()
 	}
+	project.State = agent.Running
+	m.persistProjectState(project)
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(projectIndex)
 }
@@ -507,11 +509,12 @@ func (m *Model) startSelectedProject() {
 func (m *Model) stopSelectedProject() {
 	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
-	if project == nil || project.State == agent.Stopped {
+	if project == nil || project.State == agent.Stopped || project.State == agent.Completed {
 		return
 	}
 	if len(project.Agents) == 0 {
 		project.State = agent.Stopped
+		m.persistProjectState(project)
 		m.refreshProjectAndSelection(projectIndex)
 		return
 	}
@@ -519,22 +522,117 @@ func (m *Model) stopSelectedProject() {
 	for _, agentInstance := range project.Agents {
 		agentInstance.Stop()
 	}
+	project.State = agent.Stopped
+	m.persistProjectState(project)
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(projectIndex)
 }
 
-func (m *Model) toggleSelectedProject() {
+func (m *Model) completeSelectedProject() {
+	projectIndex := m.selectedProjectIndex()
+	project := m.selectedProject()
+	if project == nil || project.State == agent.Completed {
+		return
+	}
+
+	for _, agentInstance := range project.Agents {
+		agentInstance.Complete()
+	}
+	project.State = agent.Completed
+	m.persistProjectState(project)
+	m.persistProjectAgentStates(project)
+	m.refreshProjectAndSelection(projectIndex)
+}
+
+func (m *Model) selectedAgentIndex() int {
+	project := m.selectedProject()
+	if project == nil || len(project.Agents) == 0 {
+		return -1
+	}
+	index := m.agentTable.Cursor()
+	if index < 0 || index >= len(project.Agents) {
+		return -1
+	}
+	return index
+}
+
+func (m *Model) selectedAgent() agent.AgentContract {
+	project := m.selectedProject()
+	index := m.selectedAgentIndex()
+	if project == nil || index < 0 {
+		return nil
+	}
+	return project.Agents[index]
+}
+
+func (m *Model) startSelectedAgent() {
+	project := m.selectedProject()
+	agentInstance := m.selectedAgent()
+	if project == nil || agentInstance == nil || agentInstance.State() == agent.Running || agentInstance.State() == agent.Completed {
+		return
+	}
+
+	agentInstance.Run()
+	m.persistProjectAgentStates(project)
+	m.refreshProjectAndSelection(m.selectedProjectIndex())
+}
+
+func (m *Model) stopSelectedAgent() {
+	project := m.selectedProject()
+	agentInstance := m.selectedAgent()
+	if project == nil || agentInstance == nil || agentInstance.State() == agent.Stopped || agentInstance.State() == agent.Completed {
+		return
+	}
+
+	agentInstance.Stop()
+	m.persistProjectAgentStates(project)
+	m.refreshProjectAndSelection(m.selectedProjectIndex())
+}
+
+func (m *Model) completeSelectedAgent() {
+	project := m.selectedProject()
+	agentInstance := m.selectedAgent()
+	if project == nil || agentInstance == nil || agentInstance.State() == agent.Completed {
+		return
+	}
+
+	agentInstance.Complete()
+	m.persistProjectAgentStates(project)
+	m.refreshProjectAndSelection(m.selectedProjectIndex())
+}
+
+func (m *Model) cycleSelectedProjectState() {
 	project := m.selectedProject()
 	if project == nil {
 		return
 	}
-
-	if project.State == agent.Running {
-		m.stopSelectedProject()
+	if project.State == agent.Completed {
 		return
 	}
 
-	m.startSelectedProject()
+	switch project.State {
+	case agent.Stopped:
+		m.startSelectedProject()
+	default:
+		m.stopSelectedProject()
+	}
+}
+
+func (m *Model) cycleSelectedAgentState() {
+	agentInstance := m.selectedAgent()
+	if agentInstance == nil {
+		return
+	}
+	if agentInstance.State() == agent.Completed {
+		return
+	}
+
+	switch agentInstance.State() {
+	case agent.Stopped:
+		m.startSelectedAgent()
+	default:
+		m.stopSelectedAgent()
+	}
 }
 
 func (m *Model) recordActivity(source ActivitySource, text string) {
@@ -573,13 +671,25 @@ func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bo
 		}
 		return false, false, nil
 	case key.Matches(msg, m.keymap.startProject):
-		m.startSelectedProject()
+		if m.focusIndex == 1 {
+			m.startSelectedAgent()
+		} else {
+			m.startSelectedProject()
+		}
 		return false, true, nil
 	case key.Matches(msg, m.keymap.stopProject):
-		m.stopSelectedProject()
+		if m.focusIndex == 1 {
+			m.stopSelectedAgent()
+		} else {
+			m.stopSelectedProject()
+		}
 		return false, true, nil
 	case key.Matches(msg, m.keymap.toggleProject):
-		m.toggleSelectedProject()
+		if m.focusIndex == 1 {
+			m.cycleSelectedAgentState()
+		} else {
+			m.cycleSelectedProjectState()
+		}
 		return false, true, nil
 	default:
 		return false, false, nil
@@ -768,6 +878,7 @@ func (m *Model) saveSelectedProjectEditor() tea.Cmd {
 				return nil
 			}
 			newProject.ProjectID = persistedProject.ID
+			newProject.State = parseAgentState(persistedProject.State)
 		}
 
 		m.projects = append(m.projects, newProject)
@@ -810,35 +921,32 @@ func (m *Model) resizeProjectEditor() {
 	m.projectEditor.instructionsInput.SetHeight(6)
 }
 
-func (m *Model) syncAllProjectStates() {
-	for i := range m.projects {
-		m.syncProjectState(i)
-	}
-}
-
 func (m *Model) refreshProjectAndSelection(projectIndex int) {
-	m.syncProjectState(projectIndex)
 	m.refreshProjectTable()
 	if projectIndex == m.selectedProjectIndex() {
 		m.refreshSelectedProjectTables()
 	}
 }
 
-func (m *Model) syncProjectState(projectIndex int) {
-	if projectIndex < 0 || projectIndex >= len(m.projects) {
-		return
+func parseAgentState(state string) agent.AgentState {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case agent.Running.String():
+		return agent.Running
+	case agent.Completed.String():
+		return agent.Completed
+	default:
+		return agent.Stopped
 	}
-	if len(m.projects[projectIndex].Agents) == 0 {
+}
+
+func (m *Model) persistProjectState(project *Project) {
+	if m.repository == nil || project == nil || project.ProjectID <= 0 {
 		return
 	}
 
-	for _, agentInstance := range m.projects[projectIndex].Agents {
-		if agentInstance.State() == agent.Running {
-			m.projects[projectIndex].State = agent.Running
-			return
-		}
+	if err := m.repository.UpdateProjectState(project.ProjectID, project.State.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "persist project state: %v\n", err)
 	}
-	m.projects[projectIndex].State = agent.Stopped
 }
 
 func (m *Model) persistProjectAgentStates(project *Project) {
@@ -888,9 +996,10 @@ func (m Model) Shutdown() {
 			})
 			m.persistActivity(project, agentIndex, activityText)
 		}
+		if project.State == agent.Running {
+			project.State = agent.Stopped
+		}
+		m.persistProjectState(project)
 		m.persistProjectAgentStates(project)
-	}
-	for i := range m.projects {
-		m.syncProjectState(i)
 	}
 }

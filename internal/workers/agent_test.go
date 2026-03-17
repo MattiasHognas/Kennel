@@ -21,6 +21,24 @@ func TestStopPublishesOnlyAfterRun(t *testing.T) {
 	assertActivity(t, activityCh, "stopped")
 }
 
+func TestCompletePublishesOnlyAfterActivation(t *testing.T) {
+	a := NewAgent("Tester")
+	activityCh := a.SubscribeActivity()
+
+	a.Complete()
+	assertNoActivity(t, activityCh)
+
+	a.Run()
+	assertActivity(t, activityCh, "started")
+
+	a.Complete()
+	assertActivity(t, activityCh, "completed")
+
+	if got := a.State(); got != Completed {
+		t.Fatalf("state = %s, want %s", got, Completed)
+	}
+}
+
 func assertActivity(t *testing.T, ch <-chan eventbus.Event, want string) {
 	t.Helper()
 

@@ -17,6 +17,7 @@ var ErrProjectNotFound = errors.New("project not found")
 type Project struct {
 	ID           int64
 	Name         string
+	State        string
 	Workplace    string
 	Instructions string
 	CreatedAt    time.Time
@@ -114,9 +115,9 @@ func (r *SQLiteRepository) CreateProjectConfiguration(name, workplace, instructi
 	}
 
 	result, err := r.db.Exec(`
-		INSERT INTO projects(name, workplace, instructions)
-		VALUES (?, ?, ?)
-	`, name, workplace, instructions)
+		INSERT INTO projects(name, state, workplace, instructions)
+		VALUES (?, ?, ?, ?)
+	`, name, "stopped", workplace, instructions)
 	if err != nil {
 		return Project{}, fmt.Errorf("insert project: %w", err)
 	}
@@ -188,6 +189,33 @@ func (r *SQLiteRepository) UpdateProjectConfiguration(projectID int64, name, wor
 	`, name, workplace, instructions, projectID)
 	if err != nil {
 		return fmt.Errorf("update project configuration: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check updated rows: %w", err)
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+
+	return nil
+}
+
+func (r *SQLiteRepository) UpdateProjectState(projectID int64, state string) error {
+	if projectID <= 0 {
+		return errors.New("project id must be positive")
+	}
+
+	state = normalizeState(state)
+
+	result, err := r.db.Exec(`
+		UPDATE projects
+		SET state = ?
+		WHERE id = ?
+	`, state, projectID)
+	if err != nil {
+		return fmt.Errorf("update project state: %w", err)
 	}
 
 	affected, err := result.RowsAffected()
@@ -288,18 +316,19 @@ func (r *SQLiteRepository) ReadProject(projectID int64) (Project, error) {
 	}
 
 	row := r.db.QueryRow(`
-		SELECT id, name, workplace, instructions, created_at
+		SELECT id, name, state, workplace, instructions, created_at
 		FROM projects
 		WHERE id = ?
 	`, projectID)
 
 	var project Project
-	if err := row.Scan(&project.ID, &project.Name, &project.Workplace, &project.Instructions, &project.CreatedAt); err != nil {
+	if err := row.Scan(&project.ID, &project.Name, &project.State, &project.Workplace, &project.Instructions, &project.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Project{}, ErrProjectNotFound
 		}
 		return Project{}, fmt.Errorf("read project: %w", err)
 	}
+	project.State = normalizeState(project.State)
 
 	agents, err := r.readAgents(project.ID)
 	if err != nil {
@@ -415,6 +444,7 @@ func (r *SQLiteRepository) ensureSchema() error {
 	CREATE TABLE IF NOT EXISTS projects (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL,
+		state TEXT NOT NULL DEFAULT 'stopped',
 		workplace TEXT NOT NULL DEFAULT '',
 		instructions TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -448,6 +478,7 @@ func (r *SQLiteRepository) ensureSchema() error {
 		return fmt.Errorf("create sqlite schema: %w", err)
 	}
 
+	var hasProjectStateColumn bool
 	var hasWorkplaceColumn bool
 	var hasInstructionsColumn bool
 	rows, err := r.db.Query(`PRAGMA table_info(projects)`)
@@ -462,6 +493,9 @@ func (r *SQLiteRepository) ensureSchema() error {
 			rows.Close()
 			return fmt.Errorf("scan table_info: %w", err)
 		}
+		if name == "state" {
+			hasProjectStateColumn = true
+		}
 		if name == "workplace" {
 			hasWorkplaceColumn = true
 		}
@@ -474,6 +508,12 @@ func (r *SQLiteRepository) ensureSchema() error {
 		return fmt.Errorf("iterate table_info: %w", err)
 	}
 	rows.Close()
+
+	if !hasProjectStateColumn {
+		if _, err := r.db.Exec(`ALTER TABLE projects ADD COLUMN state TEXT NOT NULL DEFAULT 'stopped'`); err != nil {
+			return fmt.Errorf("migrate projects table with state column: %w", err)
+		}
+	}
 
 	if !hasWorkplaceColumn {
 		if _, err := r.db.Exec(`ALTER TABLE projects ADD COLUMN workplace TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -521,13 +561,17 @@ func (r *SQLiteRepository) ensureSchema() error {
 		return fmt.Errorf("migrate legacy paused states: %w", err)
 	}
 
+	if _, err := r.db.Exec(`UPDATE projects SET state = 'stopped' WHERE lower(state) = 'paused' OR trim(state) = ''`); err != nil {
+		return fmt.Errorf("migrate legacy project states: %w", err)
+	}
+
 	return nil
 }
 
 func normalizeState(state string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(state))
 	switch trimmed {
-	case "running", "stopped":
+	case "running", "stopped", "completed":
 		return trimmed
 	default:
 		return "stopped"
