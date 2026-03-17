@@ -8,9 +8,9 @@ import (
 	repository "MattiasHognas/Kennel/internal/data"
 	logic "MattiasHognas/Kennel/internal/logic"
 	model "MattiasHognas/Kennel/internal/logic"
+	table "MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
 
-	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -55,10 +55,10 @@ func initialModel() (logic.Model, func()) {
 }
 
 func newTableStyles() (table.Styles, table.Styles) {
-	base := lipgloss.NewStyle().Foreground(lipgloss.Color("#ebdbb2")).Padding(0, 1)
-	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#fbf1c7")).Background(lipgloss.Color("#3c3836")).Padding(0, 1)
-	focusedSelected := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1d2021")).Background(lipgloss.Color("#8ec07c"))
-	blurredSelected := lipgloss.NewStyle().Foreground(lipgloss.Color("#d5c4a1")).Background(lipgloss.Color("#504945"))
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color("#ebdbb2"))
+	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#fbf1c7")).Background(lipgloss.Color("#3c3836"))
+	focusedSelected := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1d2021")).Background(lipgloss.Color("#8ec07c")).Padding(0, 0)
+	blurredSelected := lipgloss.NewStyle().Foreground(lipgloss.Color("#d5c4a1")).Background(lipgloss.Color("#504945")).Padding(0, 0)
 
 	return table.Styles{
 			Header:   header,

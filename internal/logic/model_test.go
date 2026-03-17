@@ -5,9 +5,8 @@ import (
 	"testing"
 
 	repository "MattiasHognas/Kennel/internal/data"
+	"MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
-
-	"charm.land/bubbles/v2/table"
 )
 
 func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {

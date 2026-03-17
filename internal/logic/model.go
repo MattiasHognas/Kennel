@@ -10,8 +10,9 @@ import (
 	"fmt"
 	"os"
 
+	"MattiasHognas/Kennel/internal/ui/table"
+
 	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -71,6 +72,7 @@ const (
 	DefaultActivityWidth = 60
 	DefaultTableHeight   = 8
 	FooterHeight         = 4
+	TableGap             = 2
 )
 
 func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, repository *repository.SQLiteRepository) Model {
@@ -239,9 +241,10 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) tableViews() []string {
+	spacedTable := lipgloss.NewStyle().MarginRight(TableGap)
 	return []string{
-		m.projectTable.View(),
-		m.agentTable.View(),
+		spacedTable.Render(m.projectTable.View()),
+		spacedTable.Render(m.agentTable.View()),
 		m.activityTable.View(),
 	}
 }
@@ -252,12 +255,13 @@ func (m *Model) ResizeTables(width, height int) {
 	}
 
 	tableHeight := max(DefaultTableHeight, height-FooterHeight)
-	projectWidth := max(DefaultProjectWidth, width/4)
-	agentWidth := max(DefaultAgentWidth, width/5)
-	activityWidth := max(DefaultActivityWidth, width-projectWidth-agentWidth-4)
+	availableWidth := max(width-(TableGap*2), DefaultProjectWidth+DefaultAgentWidth+32)
+	projectWidth := max(DefaultProjectWidth, availableWidth/4)
+	agentWidth := max(DefaultAgentWidth, availableWidth/5)
+	activityWidth := max(DefaultActivityWidth, availableWidth-projectWidth-agentWidth)
 
-	if projectWidth+agentWidth+activityWidth > width {
-		activityWidth = max(32, width-projectWidth-agentWidth-2)
+	if projectWidth+agentWidth+activityWidth > availableWidth {
+		activityWidth = max(32, availableWidth-projectWidth-agentWidth)
 	}
 
 	m.projectTable.SetWidth(projectWidth)
