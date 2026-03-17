@@ -55,10 +55,12 @@ func initialModel() (logic.Model, func()) {
 }
 
 func newTableStyles() (table.Styles, table.Styles) {
-	base := lipgloss.NewStyle().Foreground(lipgloss.Color("#ebdbb2"))
-	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#fbf1c7")).Background(lipgloss.Color("#3c3836"))
-	focusedSelected := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1d2021")).Background(lipgloss.Color("#8ec07c")).Padding(0, 0)
-	blurredSelected := lipgloss.NewStyle().Foreground(lipgloss.Color("#d5c4a1")).Background(lipgloss.Color("#504945")).Padding(0, 0)
+	focusedStyle := lipgloss.Color("210")
+	headerStyle := lipgloss.Color("210")
+	base := lipgloss.NewStyle().Padding(0, 1)
+	header := lipgloss.NewStyle().Bold(true).Foreground(headerStyle).Padding(0, 1).Border(lipgloss.NormalBorder()).BorderBottom(true).BorderLeft(false).BorderRight(false).BorderTop(false)
+	focusedSelected := lipgloss.NewStyle().Bold(true).Background(focusedStyle)
+	blurredSelected := lipgloss.NewStyle()
 
 	return table.Styles{
 			Header:   header,
