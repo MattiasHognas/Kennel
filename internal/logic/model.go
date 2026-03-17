@@ -1,8 +1,10 @@
 package model
 
 import (
+	repository "MattiasHognas/Kennel/internal/data"
 	eventbus "MattiasHognas/Kennel/internal/events"
 	agent "MattiasHognas/Kennel/internal/workers"
+	"database/sql"
 
 	"fmt"
 
@@ -13,9 +15,11 @@ import (
 )
 
 type Project struct {
+	ProjectID  int64
 	Name       string
 	State      agent.AgentState
 	Agents     []agent.AgentContract
+	AgentIDs   []int64
 	Activities []string
 }
 
@@ -35,7 +39,7 @@ type Keymap struct {
 	nextTable     key.Binding
 	prevTable     key.Binding
 	startProject  key.Binding
-	pauseProject  key.Binding
+	stopProject   key.Binding
 	toggleProject key.Binding
 }
 
@@ -51,6 +55,7 @@ type Model struct {
 	windowWidth   int
 	windowHeight  int
 	keymap        Keymap
+	repository    *repository.SQLiteRepository
 }
 
 const (
@@ -61,7 +66,7 @@ const (
 	FooterHeight         = 4
 )
 
-func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project) Model {
+func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, repository *repository.SQLiteRepository) Model {
 	return Model{
 		projectTable:  newProjectTable(blurredStyles),
 		agentTable:    newSingleColumnTable("Agents", DefaultAgentWidth, blurredStyles),
@@ -69,6 +74,7 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project) Mod
 		focusedStyles: focusedStyles,
 		blurredStyles: blurredStyles,
 		projects:      projects,
+		repository:    repository,
 		keymap: Keymap{
 			quit: key.NewBinding(
 				key.WithKeys("esc", "ctrl+c", "q"),
@@ -86,9 +92,9 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project) Mod
 				key.WithKeys("s"),
 				key.WithHelp("s", "start project"),
 			),
-			pauseProject: key.NewBinding(
+			stopProject: key.NewBinding(
 				key.WithKeys("p"),
-				key.WithHelp("p", "pause project"),
+				key.WithHelp("p", "stop project"),
 			),
 			toggleProject: key.NewBinding(
 				key.WithKeys("enter", "space"),
@@ -162,8 +168,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keymap.startProject):
 			m.startSelectedProject()
 			return m, nil
-		case key.Matches(msg, m.keymap.pauseProject):
-			m.pauseSelectedProject()
+		case key.Matches(msg, m.keymap.stopProject):
+			m.stopSelectedProject()
 			return m, nil
 		case key.Matches(msg, m.keymap.toggleProject):
 			m.toggleSelectedProject()
@@ -208,7 +214,7 @@ func (m Model) View() tea.View {
 		"",
 		lipgloss.JoinHorizontal(lipgloss.Top, m.tableViews()...),
 		"",
-		"tab/shift+tab switches tables, s starts, p pauses, enter toggles the selected project.",
+		"tab/shift+tab switches tables, s starts, p stops, enter toggles the selected project.",
 		"Activities come from agents and are shown for the currently selected project.",
 	)
 
@@ -366,18 +372,20 @@ func (m *Model) startSelectedProject() {
 	for _, agentInstance := range project.Agents {
 		agentInstance.Run()
 	}
+	m.persistProjectAgentStates(project)
 	m.RefreshAllTables()
 }
 
-func (m *Model) pauseSelectedProject() {
+func (m *Model) stopSelectedProject() {
 	project := m.selectedProject()
-	if project == nil || project.State == agent.Paused || project.State == agent.Stopped {
+	if project == nil || project.State == agent.Stopped {
 		return
 	}
 
 	for _, agentInstance := range project.Agents {
-		agentInstance.Pause()
+		agentInstance.Stop()
 	}
+	m.persistProjectAgentStates(project)
 	m.RefreshAllTables()
 }
 
@@ -388,7 +396,7 @@ func (m *Model) toggleSelectedProject() {
 	}
 
 	if project.State == agent.Running {
-		m.pauseSelectedProject()
+		m.stopSelectedProject()
 		return
 	}
 
@@ -405,7 +413,9 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 		return
 	}
 
-	project.Activities = append(project.Activities, fmt.Sprintf("%s: %s", project.Agents[source.agentIndex].Name(), text))
+	activityText := fmt.Sprintf("%s: %s", project.Agents[source.agentIndex].Name(), text)
+	project.Activities = append(project.Activities, activityText)
+	m.persistActivity(project, source.agentIndex, activityText)
 	if len(project.Activities) > 100 {
 		project.Activities = project.Activities[len(project.Activities)-100:]
 	}
@@ -422,15 +432,38 @@ func (m *Model) syncProjectState(projectIndex int) {
 		return
 	}
 
-	state := agent.Stopped
 	for _, agentInstance := range m.projects[projectIndex].Agents {
-		switch agentInstance.State() {
-		case agent.Running:
+		if agentInstance.State() == agent.Running {
 			m.projects[projectIndex].State = agent.Running
 			return
-		case agent.Paused:
-			state = agent.Paused
 		}
 	}
-	m.projects[projectIndex].State = state
+	m.projects[projectIndex].State = agent.Stopped
+}
+
+func (m *Model) persistProjectAgentStates(project *Project) {
+	if m.repository == nil || project == nil || len(project.AgentIDs) == 0 {
+		return
+	}
+
+	for i, agentID := range project.AgentIDs {
+		if i >= len(project.Agents) || agentID <= 0 {
+			continue
+		}
+
+		_ = m.repository.UpdateAgentState(agentID, project.Agents[i].State().String())
+	}
+}
+
+func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
+	if m.repository == nil || project == nil || project.ProjectID <= 0 {
+		return
+	}
+
+	agentID := sql.NullInt64{}
+	if agentIndex >= 0 && agentIndex < len(project.AgentIDs) && project.AgentIDs[agentIndex] > 0 {
+		agentID = sql.NullInt64{Int64: project.AgentIDs[agentIndex], Valid: true}
+	}
+
+	_, _ = m.repository.NewActivity(project.ProjectID, agentID, text)
 }
