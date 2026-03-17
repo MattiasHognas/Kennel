@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 
@@ -27,12 +28,16 @@ func main() {
 
 func initialModel() (logic.Model, func()) {
 	focusedStyles, blurredStyles := newTableStyles()
-	projects, repository := loadProjects()
-	m := logic.NewModel(focusedStyles, blurredStyles, projects, repository)
+	repository, err := repository.NewSQLiteRepository("data/kennel.db")
+	if err != nil {
+		fatalErr := fmt.Sprintf("Failed to initialize repository: %v", err)
+		fmt.Println(fatalErr)
+		os.Exit(1)
+	}
+	sampleProjects := loadProjects(repository)
+	m := logic.NewModel(focusedStyles, blurredStyles, sampleProjects, repository)
 
-	m.Sources = m.BuildActivitySources()
 	m.ResizeTables(logic.DefaultProjectWidth+logic.DefaultAgentWidth+logic.DefaultActivityWidth, logic.DefaultTableHeight+logic.FooterHeight+4)
-	m.RefreshAllTables()
 	m.SetFocus(0)
 
 	cleanup := func() {
@@ -60,7 +65,27 @@ func newTableStyles() (table.Styles, table.Styles) {
 }
 
 func sampleProjects() []model.Project {
-	projectDefinitions := sampleProjectDefinitions()
+	projectDefinitions := []struct {
+		name       string
+		agents     []string
+		activities []string
+	}{
+		{
+			name:       "Barky barky",
+			agents:     []string{"Planner", "UX", "Frontend Developer", "QA", "DevOps"},
+			activities: []string{"Project created", "Planner: defined initial scope", "UX: sketched primary workflow"},
+		},
+		{
+			name:       "Sniff sniff",
+			agents:     []string{"Planner", "Backend Developer", "QA"},
+			activities: []string{"Project created", "Planner: prepared backlog", "Backend Developer: designed API contract"},
+		},
+		{
+			name:       "Grr Grr",
+			agents:     []string{"Planning", "Backend Developer 1", "Backend Developer 2", "QA", "DevOps"},
+			activities: []string{"Project created", "Planning: split delivery phases", "DevOps: prepared deployment pipeline"},
+		},
+	}
 
 	projects := make([]model.Project, 0, len(projectDefinitions))
 	for _, definition := range projectDefinitions {
@@ -70,51 +95,34 @@ func sampleProjects() []model.Project {
 		}
 
 		projects = append(projects, model.Project{
-			Name:   definition.name,
-			State:  agent.Stopped,
-			Agents: agents,
+			Name:       definition.name,
+			State:      agent.Stopped,
+			Agents:     agents,
+			Activities: append([]string(nil), definition.activities...),
 		})
 	}
 
 	return projects
 }
 
-func sampleProjectDefinitions() []struct {
-	name   string
-	agents []string
-} {
-	return []struct {
-		name   string
-		agents []string
-	}{
-		{name: "Barky barky", agents: []string{"Planner", "UX", "Frontend Developer", "QA", "DevOps"}},
-		{name: "Sniff sniff", agents: []string{"Planner", "Backend Developer", "QA"}},
-		{name: "Grr Grr", agents: []string{"Planning", "Backend Developer 1", "Backend Developer 2", "QA", "DevOps"}},
-	}
-}
+func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
-func loadProjects() ([]model.Project, *repository.SQLiteRepository) {
-	repo, err := repository.NewSQLiteRepository("data/kennel.db")
+	storedProjects, err := repository.ReadProjects()
 	if err != nil {
-		return sampleProjects(), nil
-	}
-
-	storedProjects, err := repo.ReadProjects()
-	if err != nil {
-		_ = repo.Close()
-		return sampleProjects(), nil
+		_ = repository.Close()
+		return sampleProjects()
 	}
 
 	if len(storedProjects) == 0 {
-		if err := seedSampleProjects(repo); err != nil {
-			_ = repo.Close()
-			return sampleProjects(), nil
+		if err := seedSampleProjects(repository); err != nil {
+			_ = repository.Close()
+			return sampleProjects()
 		}
 
-		storedProjects, err = repo.ReadProjects()
+		storedProjects, err = repository.ReadProjects()
 		if err != nil || len(storedProjects) == 0 {
-			_ = repo.Close()
-			return sampleProjects(), nil
+			_ = repository.Close()
+			return sampleProjects()
 		}
 	}
 
@@ -141,18 +149,24 @@ func loadProjects() ([]model.Project, *repository.SQLiteRepository) {
 		})
 	}
 
-	return projects, repo
+	return projects
 }
 
 func seedSampleProjects(repo *repository.SQLiteRepository) error {
-	for _, definition := range sampleProjectDefinitions() {
-		project, err := repo.CreateProject(definition.name)
+	for _, definition := range sampleProjects() {
+		project, err := repo.CreateProject(definition.Name)
 		if err != nil {
 			return err
 		}
 
-		for _, agentName := range definition.agents {
-			if _, err := repo.AddAgentToProject(project.ID, agentName); err != nil {
+		for _, agentInstance := range definition.Agents {
+			if _, err := repo.AddAgentToProject(project.ID, agentInstance.Name()); err != nil {
+				return err
+			}
+		}
+
+		for _, activity := range definition.Activities {
+			if _, err := repo.NewActivity(project.ID, sql.NullInt64{}, activity); err != nil {
 				return err
 			}
 		}

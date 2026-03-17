@@ -67,7 +67,7 @@ const (
 )
 
 func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, repository *repository.SQLiteRepository) Model {
-	return Model{
+	m := Model{
 		projectTable:  newProjectTable(blurredStyles),
 		agentTable:    newSingleColumnTable("Agents", DefaultAgentWidth, blurredStyles),
 		activityTable: newSingleColumnTable("Activity", DefaultActivityWidth, blurredStyles),
@@ -102,6 +102,12 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 			),
 		},
 	}
+
+	m.Sources = m.BuildActivitySources()
+	m.syncAllProjectStates()
+	m.refreshProjectTable()
+	m.refreshSelectedProjectTables()
+	return m
 }
 
 func newProjectTable(styles table.Styles) table.Model {
@@ -156,23 +162,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForActivity(msg.source)
 
 	case tea.KeyPressMsg:
-		switch {
-		case key.Matches(msg, m.keymap.quit):
-			return m, tea.Quit
-		case key.Matches(msg, m.keymap.nextTable):
-			m.SetFocus(m.focusIndex + 1)
-			return m, nil
-		case key.Matches(msg, m.keymap.prevTable):
-			m.SetFocus(m.focusIndex - 1)
-			return m, nil
-		case key.Matches(msg, m.keymap.startProject):
-			m.startSelectedProject()
-			return m, nil
-		case key.Matches(msg, m.keymap.stopProject):
-			m.stopSelectedProject()
-			return m, nil
-		case key.Matches(msg, m.keymap.toggleProject):
-			m.toggleSelectedProject()
+		if shouldStop, handled := m.handleKeyPress(msg); handled {
+			if shouldStop {
+				return m, tea.Quit
+			}
 			return m, nil
 		}
 	}
@@ -259,8 +252,6 @@ func (m *Model) ResizeTables(width, height int) {
 	m.activityTable.SetWidth(activityWidth)
 	m.activityTable.SetHeight(tableHeight)
 	m.activityTable.SetColumns([]table.Column{{Title: "Activity", Width: max(24, activityWidth-2)}})
-
-	m.RefreshAllTables()
 }
 
 func (m *Model) SetFocus(index int) {
@@ -285,16 +276,10 @@ func (m *Model) SetFocus(index int) {
 	}
 }
 
-func (m *Model) RefreshAllTables() {
-	m.refreshProjectTable()
-	m.refreshSelectedProjectTables()
-}
-
 func (m *Model) refreshProjectTable() {
 	rows := make([]table.Row, 0, len(m.projects))
-	for i := range m.projects {
-		m.syncProjectState(i)
-		rows = append(rows, table.Row{m.projects[i].Name, m.projects[i].State.String()})
+	for _, project := range m.projects {
+		rows = append(rows, table.Row{project.Name, project.State.String()})
 	}
 	m.projectTable.SetRows(rows)
 }
@@ -364,6 +349,7 @@ func (m *Model) selectedProjectSummary() string {
 }
 
 func (m *Model) startSelectedProject() {
+	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
 	if project == nil || project.State == agent.Running {
 		return
@@ -373,10 +359,11 @@ func (m *Model) startSelectedProject() {
 		agentInstance.Run()
 	}
 	m.persistProjectAgentStates(project)
-	m.RefreshAllTables()
+	m.refreshProjectAndSelection(projectIndex)
 }
 
 func (m *Model) stopSelectedProject() {
+	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
 	if project == nil || project.State == agent.Stopped {
 		return
@@ -386,7 +373,7 @@ func (m *Model) stopSelectedProject() {
 		agentInstance.Stop()
 	}
 	m.persistProjectAgentStates(project)
-	m.RefreshAllTables()
+	m.refreshProjectAndSelection(projectIndex)
 }
 
 func (m *Model) toggleSelectedProject() {
@@ -420,9 +407,43 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 		project.Activities = project.Activities[len(project.Activities)-100:]
 	}
 
-	m.syncProjectState(source.projectIndex)
+	m.refreshProjectAndSelection(source.projectIndex)
+}
+
+func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bool) {
+	switch {
+	case key.Matches(msg, m.keymap.quit):
+		return true, true
+	case key.Matches(msg, m.keymap.nextTable):
+		m.SetFocus(m.focusIndex + 1)
+		return false, true
+	case key.Matches(msg, m.keymap.prevTable):
+		m.SetFocus(m.focusIndex - 1)
+		return false, true
+	case key.Matches(msg, m.keymap.startProject):
+		m.startSelectedProject()
+		return false, true
+	case key.Matches(msg, m.keymap.stopProject):
+		m.stopSelectedProject()
+		return false, true
+	case key.Matches(msg, m.keymap.toggleProject):
+		m.toggleSelectedProject()
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func (m *Model) syncAllProjectStates() {
+	for i := range m.projects {
+		m.syncProjectState(i)
+	}
+}
+
+func (m *Model) refreshProjectAndSelection(projectIndex int) {
+	m.syncProjectState(projectIndex)
 	m.refreshProjectTable()
-	if source.projectIndex == m.selectedProjectIndex() {
+	if projectIndex == m.selectedProjectIndex() {
 		m.refreshSelectedProjectTables()
 	}
 }
