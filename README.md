@@ -7,7 +7,11 @@ Run tests
 ```go
 go test ./...
 ```
-
+Code coverage
+```go
+go test -coverprofile="coverage.out" ./...
+go tool cover -html="coverage.out"
+```
 
 ## Features to come
 

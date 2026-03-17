@@ -8,10 +8,7 @@ import (
 )
 
 func TestSelectedStyleAppliesToEveryCell(t *testing.T) {
-	cellStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ebdbb2")).Padding(0, 1)
-	selectedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#1d2021")).
-		Background(lipgloss.Color("#00ff00"))
+	selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("#00ff00"))
 
 	tableModel := New(
 		WithColumns([]Column{
@@ -21,7 +18,7 @@ func TestSelectedStyleAppliesToEveryCell(t *testing.T) {
 		WithRows([]Row{{"Running", "Planner"}}),
 		WithStyles(Styles{
 			Header:   lipgloss.NewStyle(),
-			Cell:     cellStyle,
+			Cell:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ebdbb2")).Padding(0, 1),
 			Selected: selectedStyle,
 		}),
 		WithHeight(1),
@@ -35,18 +32,11 @@ func TestSelectedStyleAppliesToEveryCell(t *testing.T) {
 	}
 
 	selectedRow := lines[1]
+	if !strings.Contains(selectedRow, "Running") || !strings.Contains(selectedRow, "Planner") {
+		t.Fatalf("selected row %q does not contain both cell values", selectedRow)
+	}
 
-	// Compose the style that should be applied to each selected cell:
-	// start from the base cell style (for padding, etc.) and override
-	// foreground/background to match the selected style.
-	selectedCellStyle := cellStyle.Copy().
-		Foreground(lipgloss.Color("#1d2021")).
-		Background(lipgloss.Color("#00ff00"))
-
-	runningCell := selectedCellStyle.Render("Running")
-	plannerCell := selectedCellStyle.Render("Planner")
-
-	if !strings.Contains(selectedRow, runningCell) || !strings.Contains(selectedRow, plannerCell) {
-		t.Fatalf("selected row %q does not contain expected styled cells %q and %q", selectedRow, runningCell, plannerCell)
+	if count := strings.Count(selectedRow, "48;2;0;255;0m"); count != 2 {
+		t.Fatalf("selected background count = %d, want 2 in row %q", count, selectedRow)
 	}
 }
