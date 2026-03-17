@@ -76,7 +76,7 @@ const (
 func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, repository *repository.SQLiteRepository) Model {
 	m := Model{
 		projectTable:  newProjectTable(blurredStyles),
-		agentTable:    newSingleColumnTable("Agents", DefaultAgentWidth, blurredStyles),
+		agentTable:    newAgentTable(DefaultAgentWidth, blurredStyles),
 		activityTable: newActivityTable("Activity", DefaultActivityWidth, blurredStyles),
 		focusedStyles: focusedStyles,
 		blurredStyles: blurredStyles,
@@ -120,8 +120,8 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 func newProjectTable(styles table.Styles) table.Model {
 	return table.New(
 		table.WithColumns([]table.Column{
-			{Title: "Projects", Width: DefaultProjectWidth - 12},
 			{Title: "State", Width: 10},
+			{Title: "Projects", Width: DefaultProjectWidth - 12},
 		}),
 		table.WithStyles(styles),
 		table.WithWidth(DefaultProjectWidth),
@@ -141,9 +141,12 @@ func newActivityTable(title string, width int, styles table.Styles) table.Model 
 	)
 }
 
-func newSingleColumnTable(title string, width int, styles table.Styles) table.Model {
+func newAgentTable(width int, styles table.Styles) table.Model {
 	return table.New(
-		table.WithColumns([]table.Column{{Title: title, Width: max(12, width-2)}}),
+		table.WithColumns([]table.Column{
+			{Title: "State", Width: 10},
+			{Title: "Agents", Width: max(12, width-2-12)},
+		}),
 		table.WithStyles(styles),
 		table.WithWidth(width),
 		table.WithHeight(DefaultTableHeight),
@@ -260,13 +263,16 @@ func (m *Model) ResizeTables(width, height int) {
 	m.projectTable.SetWidth(projectWidth)
 	m.projectTable.SetHeight(tableHeight)
 	m.projectTable.SetColumns([]table.Column{
-		{Title: "Projects", Width: max(16, projectWidth-12)},
 		{Title: "State", Width: 10},
+		{Title: "Projects", Width: max(16, projectWidth-12)},
 	})
 
 	m.agentTable.SetWidth(agentWidth)
 	m.agentTable.SetHeight(tableHeight)
-	m.agentTable.SetColumns([]table.Column{{Title: "Agents", Width: max(12, agentWidth-2)}})
+	m.agentTable.SetColumns([]table.Column{
+		{Title: "State", Width: 10},
+		{Title: "Agents", Width: max(12, agentWidth-2-12)},
+	})
 
 	m.activityTable.SetWidth(activityWidth)
 	m.activityTable.SetHeight(tableHeight)
@@ -301,7 +307,7 @@ func (m *Model) SetFocus(index int) {
 func (m *Model) refreshProjectTable() {
 	rows := make([]table.Row, 0, len(m.projects))
 	for _, project := range m.projects {
-		rows = append(rows, table.Row{project.Name, project.State.String()})
+		rows = append(rows, table.Row{project.State.String(), project.Name})
 	}
 	m.projectTable.SetRows(rows)
 }
@@ -309,17 +315,17 @@ func (m *Model) refreshProjectTable() {
 func (m *Model) refreshSelectedProjectTables() {
 	project := m.selectedProject()
 	if project == nil {
-		m.agentTable.SetRows([]table.Row{{"No agents"}})
-		m.activityTable.SetRows([]table.Row{{"No activity"}})
+		m.agentTable.SetRows([]table.Row{{"-", "No agents"}})
+		m.activityTable.SetRows([]table.Row{{"-", "No activity"}})
 		return
 	}
 
 	agentRows := make([]table.Row, 0, len(project.Agents))
 	for _, agentInstance := range project.Agents {
-		agentRows = append(agentRows, table.Row{fmt.Sprintf("%s [%s]", agentInstance.Name(), agentInstance.State())})
+		agentRows = append(agentRows, table.Row{agentInstance.State().String(), agentInstance.Name()})
 	}
 	if len(agentRows) == 0 {
-		agentRows = append(agentRows, table.Row{"No agents"})
+		agentRows = append(agentRows, table.Row{"-", "No agents"})
 	}
 	m.agentTable.SetRows(agentRows)
 
