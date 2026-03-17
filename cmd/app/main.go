@@ -159,21 +159,21 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 	return projects
 }
 
-func seedSampleProjects(repo *repository.SQLiteRepository) error {
+func seedSampleProjects(repository *repository.SQLiteRepository) error {
 	for _, definition := range sampleProjects() {
-		project, err := repo.CreateProject(definition.Name)
+		project, err := repository.CreateProject(definition.Name)
 		if err != nil {
 			return err
 		}
 
 		for _, agentInstance := range definition.Agents {
-			if _, err := repo.AddAgentToProject(project.ID, agentInstance.Name()); err != nil {
+			if _, err := repository.AddAgentToProject(project.ID, agentInstance.Name()); err != nil {
 				return err
 			}
 		}
 
 		for _, activity := range definition.Activities {
-			if _, err := repo.NewActivity(project.ID, sql.NullInt64{}, activity); err != nil {
+			if _, err := repository.NewActivity(project.ID, sql.NullInt64{}, activity); err != nil {
 				return err
 			}
 		}

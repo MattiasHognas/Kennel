@@ -61,13 +61,13 @@ func NewSQLiteRepository(dsn string) (*SQLiteRepository, error) {
 		return nil, fmt.Errorf("ping sqlite connection: %w", err)
 	}
 
-	repo := &SQLiteRepository{db: db}
-	if err := repo.ensureSchema(); err != nil {
+	repository := &SQLiteRepository{db: db}
+	if err := repository.ensureSchema(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
-	return repo, nil
+	return repository, nil
 }
 
 func (r *SQLiteRepository) Close() error {
