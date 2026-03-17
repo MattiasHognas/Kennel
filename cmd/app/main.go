@@ -111,11 +111,12 @@ func sampleProjects() []model.Project {
 		}
 
 		projects = append(projects, model.Project{
-			Name:       definition.name,
-			Workplace:  "",
-			State:      agent.Stopped,
-			Agents:     agents,
-			Activities: append([]model.ActivityEntry(nil), definition.activities...),
+			Name:         definition.name,
+			Workplace:    "",
+			Instructions: "",
+			State:        agent.Stopped,
+			Agents:       agents,
+			Activities:   append([]model.ActivityEntry(nil), definition.activities...),
 		})
 	}
 
@@ -165,12 +166,13 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 		}
 
 		projects = append(projects, model.Project{
-			ProjectID:  storedProject.ID,
-			Name:       storedProject.Name,
-			Workplace:  storedProject.Workplace,
-			Agents:     agents,
-			AgentIDs:   agentIDs,
-			Activities: activities,
+			ProjectID:    storedProject.ID,
+			Name:         storedProject.Name,
+			Workplace:    storedProject.Workplace,
+			Instructions: storedProject.Instructions,
+			Agents:       agents,
+			AgentIDs:     agentIDs,
+			Activities:   activities,
 		})
 	}
 

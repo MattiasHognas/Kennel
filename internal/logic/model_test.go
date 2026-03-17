@@ -94,7 +94,8 @@ func TestEnterOpensProjectEditorAndClickingOKPersistsWorkplace(t *testing.T) {
 	}
 
 	updatedModel.projectEditor.workplaceInput.SetValue(`C:\work\kennel`)
-	clickedModel, saveCmd := updatedModel.Update(tea.MouseClickMsg(tea.Mouse{X: 1, Y: 5}))
+	updatedModel.projectEditor.instructionsInput.SetValue("step one\nstep two")
+	clickedModel, saveCmd := updatedModel.Update(tea.MouseClickMsg(tea.Mouse{X: 1, Y: 13}))
 	if saveCmd != nil {
 		saveCmd()
 	}
@@ -108,6 +109,9 @@ func TestEnterOpensProjectEditorAndClickingOKPersistsWorkplace(t *testing.T) {
 	if updatedModel.projects[0].Workplace != `C:\work\kennel` {
 		t.Fatalf("model workplace = %q, want %q", updatedModel.projects[0].Workplace, `C:\work\kennel`)
 	}
+	if updatedModel.projects[0].Instructions != "step one\nstep two" {
+		t.Fatalf("model instructions = %q, want %q", updatedModel.projects[0].Instructions, "step one\nstep two")
+	}
 
 	persistedProject, err := repo.ReadProject(storedProject.ID)
 	if err != nil {
@@ -115,6 +119,9 @@ func TestEnterOpensProjectEditorAndClickingOKPersistsWorkplace(t *testing.T) {
 	}
 	if persistedProject.Workplace != `C:\work\kennel` {
 		t.Fatalf("stored workplace = %q, want %q", persistedProject.Workplace, `C:\work\kennel`)
+	}
+	if persistedProject.Instructions != "step one\nstep two" {
+		t.Fatalf("stored instructions = %q, want %q", persistedProject.Instructions, "step one\nstep two")
 	}
 }
 

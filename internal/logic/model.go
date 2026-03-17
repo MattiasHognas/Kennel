@@ -13,6 +13,7 @@ import (
 	agent "MattiasHognas/Kennel/internal/workers"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -24,13 +25,14 @@ type ActivityEntry struct {
 }
 
 type Project struct {
-	ProjectID  int64
-	Name       string
-	Workplace  string
-	State      agent.AgentState
-	Agents     []agent.AgentContract
-	AgentIDs   []int64
-	Activities []ActivityEntry
+	ProjectID    int64
+	Name         string
+	Workplace    string
+	Instructions string
+	State        agent.AgentState
+	Agents       []agent.AgentContract
+	AgentIDs     []int64
+	Activities   []ActivityEntry
 }
 
 type viewMode int
@@ -41,9 +43,10 @@ const (
 )
 
 type projectEditor struct {
-	workplaceInput textinput.Model
-	focusIndex     int
-	errorMessage   string
+	workplaceInput    textinput.Model
+	instructionsInput textarea.Model
+	focusIndex        int
+	errorMessage      string
 }
 
 type ActivitySource struct {
@@ -144,12 +147,23 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 }
 
 func newProjectEditor() projectEditor {
-	input := textinput.New()
-	input.Placeholder = `C:\path\to\workspace`
-	input.CharLimit = 512
-	input.SetWidth(DefaultActivityWidth)
+	workplaceInput := textinput.New()
+	workplaceInput.Placeholder = `C:\path\to\workspace`
+	workplaceInput.CharLimit = 512
+	workplaceInput.SetWidth(DefaultActivityWidth)
 
-	return projectEditor{workplaceInput: input}
+	instructionsInput := textarea.New()
+	instructionsInput.Placeholder = "Add project instructions"
+	instructionsInput.CharLimit = 4000
+	instructionsInput.SetWidth(DefaultActivityWidth)
+	instructionsInput.SetHeight(6)
+	instructionsInput.ShowLineNumbers = false
+	instructionsInput.Prompt = ""
+
+	return projectEditor{
+		workplaceInput:    workplaceInput,
+		instructionsInput: instructionsInput,
+	}
 }
 
 func newProjectTable(styles table.Styles) table.Model {
@@ -539,6 +553,8 @@ func (m *Model) openSelectedProjectEditor() tea.Cmd {
 	m.projectEditor.errorMessage = ""
 	m.projectEditor.workplaceInput.SetValue(project.Workplace)
 	m.projectEditor.workplaceInput.CursorEnd()
+	m.projectEditor.instructionsInput.SetValue(project.Instructions)
+	m.projectEditor.instructionsInput.CursorEnd()
 	return m.setProjectEditorFocus(0)
 }
 
@@ -546,14 +562,21 @@ func (m *Model) closeSelectedProjectEditor() {
 	m.mode = tableViewMode
 	m.projectEditor.errorMessage = ""
 	m.projectEditor.workplaceInput.Blur()
+	m.projectEditor.instructionsInput.Blur()
 }
 
 func (m *Model) setProjectEditorFocus(index int) tea.Cmd {
-	m.projectEditor.focusIndex = ((index % 2) + 2) % 2
+	m.projectEditor.focusIndex = ((index % 3) + 3) % 3
 	if m.projectEditor.focusIndex == 0 {
+		m.projectEditor.instructionsInput.Blur()
 		return m.projectEditor.workplaceInput.Focus()
 	}
+	if m.projectEditor.focusIndex == 1 {
+		m.projectEditor.workplaceInput.Blur()
+		return m.projectEditor.instructionsInput.Focus()
+	}
 	m.projectEditor.workplaceInput.Blur()
+	m.projectEditor.instructionsInput.Blur()
 	return nil
 }
 
@@ -568,6 +591,9 @@ func (m Model) projectEditorView() string {
 		"",
 		"Workplace",
 		m.projectEditor.workplaceInput.View(),
+		"",
+		"Instructions",
+		m.projectEditor.instructionsInput.View(),
 		"",
 		m.projectEditorOKButtonView(),
 	}
@@ -590,7 +616,8 @@ func (m Model) projectEditorOKButtonView() string {
 
 func (m Model) projectEditorOKButtonBounds() (left int, top int, right int, bottom int) {
 	width := lipgloss.Width(m.projectEditorOKButtonView())
-	return 0, 5, max(0, width-1), 5
+	top = 8 + strings.Count(m.projectEditor.instructionsInput.View(), "\n")
+	return 0, top, max(0, width-1), top
 }
 
 func (m *Model) updateProjectEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -609,23 +636,30 @@ func (m *Model) updateProjectEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.closeSelectedProjectEditor()
 			return *m, nil
-		case "tab", "shift+tab", "up", "down":
+		case "tab", "shift+tab":
 			step := 1
-			if msg.String() == "shift+tab" || msg.String() == "up" {
+			if msg.String() == "shift+tab" {
 				step = -1
 			}
 			return *m, m.setProjectEditorFocus(m.projectEditor.focusIndex + step)
 		case "enter":
-			if m.projectEditor.focusIndex == 1 {
+			if m.projectEditor.focusIndex == 2 {
 				return *m, m.saveSelectedProjectEditor()
 			}
-			return *m, m.setProjectEditorFocus(1)
+			if m.projectEditor.focusIndex == 0 {
+				return *m, m.setProjectEditorFocus(1)
+			}
 		}
 	}
 
 	if m.projectEditor.focusIndex == 0 {
 		var cmd tea.Cmd
 		m.projectEditor.workplaceInput, cmd = m.projectEditor.workplaceInput.Update(msg)
+		return *m, cmd
+	}
+	if m.projectEditor.focusIndex == 1 {
+		var cmd tea.Cmd
+		m.projectEditor.instructionsInput, cmd = m.projectEditor.instructionsInput.Update(msg)
 		return *m, cmd
 	}
 
@@ -640,14 +674,16 @@ func (m *Model) saveSelectedProjectEditor() tea.Cmd {
 	}
 
 	workplace := strings.TrimSpace(m.projectEditor.workplaceInput.Value())
+	instructions := strings.TrimSpace(m.projectEditor.instructionsInput.Value())
 	if m.repository != nil && project.ProjectID > 0 {
-		if err := m.repository.UpdateProjectWorkplace(project.ProjectID, workplace); err != nil {
+		if err := m.repository.UpdateProjectConfiguration(project.ProjectID, workplace, instructions); err != nil {
 			m.projectEditor.errorMessage = fmt.Sprintf("Save failed: %v", err)
 			return nil
 		}
 	}
 
 	project.Workplace = workplace
+	project.Instructions = instructions
 	m.closeSelectedProjectEditor()
 	return nil
 }
@@ -658,6 +694,8 @@ func (m *Model) resizeProjectEditor() {
 		inputWidth = DefaultActivityWidth
 	}
 	m.projectEditor.workplaceInput.SetWidth(inputWidth)
+	m.projectEditor.instructionsInput.SetWidth(inputWidth)
+	m.projectEditor.instructionsInput.SetHeight(6)
 }
 
 func (m *Model) syncAllProjectStates() {

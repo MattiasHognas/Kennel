@@ -15,12 +15,13 @@ import (
 var ErrProjectNotFound = errors.New("project not found")
 
 type Project struct {
-	ID         int64
-	Name       string
-	Workplace  string
-	CreatedAt  time.Time
-	Agents     []Agent
-	Activities []Activity
+	ID           int64
+	Name         string
+	Workplace    string
+	Instructions string
+	CreatedAt    time.Time
+	Agents       []Agent
+	Activities   []Activity
 }
 
 type Agent struct {
@@ -106,7 +107,7 @@ func (r *SQLiteRepository) CreateProject(name string) (Project, error) {
 		return Project{}, errors.New("project name cannot be empty")
 	}
 
-	result, err := r.db.Exec(`INSERT INTO projects(name, workplace) VALUES (?, '')`, name)
+	result, err := r.db.Exec(`INSERT INTO projects(name, workplace, instructions) VALUES (?, '', '')`, name)
 	if err != nil {
 		return Project{}, fmt.Errorf("insert project: %w", err)
 	}
@@ -159,20 +160,21 @@ func (r *SQLiteRepository) AddAgentToProject(projectID int64, name string) (Agen
 	return agent, nil
 }
 
-func (r *SQLiteRepository) UpdateProjectWorkplace(projectID int64, workplace string) error {
+func (r *SQLiteRepository) UpdateProjectConfiguration(projectID int64, workplace, instructions string) error {
 	if projectID <= 0 {
 		return errors.New("project id must be positive")
 	}
 
 	workplace = strings.TrimSpace(workplace)
+	instructions = strings.TrimSpace(instructions)
 
 	result, err := r.db.Exec(`
 		UPDATE projects
-		SET workplace = ?
+		SET workplace = ?, instructions = ?
 		WHERE id = ?
-	`, workplace, projectID)
+	`, workplace, instructions, projectID)
 	if err != nil {
-		return fmt.Errorf("update project workplace: %w", err)
+		return fmt.Errorf("update project configuration: %w", err)
 	}
 
 	affected, err := result.RowsAffected()
@@ -273,13 +275,13 @@ func (r *SQLiteRepository) ReadProject(projectID int64) (Project, error) {
 	}
 
 	row := r.db.QueryRow(`
-		SELECT id, name, workplace, created_at
+		SELECT id, name, workplace, instructions, created_at
 		FROM projects
 		WHERE id = ?
 	`, projectID)
 
 	var project Project
-	if err := row.Scan(&project.ID, &project.Name, &project.Workplace, &project.CreatedAt); err != nil {
+	if err := row.Scan(&project.ID, &project.Name, &project.Workplace, &project.Instructions, &project.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Project{}, ErrProjectNotFound
 		}
@@ -401,6 +403,7 @@ func (r *SQLiteRepository) ensureSchema() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL,
 		workplace TEXT NOT NULL DEFAULT '',
+		instructions TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -432,38 +435,8 @@ func (r *SQLiteRepository) ensureSchema() error {
 		return fmt.Errorf("create sqlite schema: %w", err)
 	}
 
-	var hasWorkplaceColumn bool
-	rows, err := r.db.Query(`PRAGMA table_info(projects)`)
-	if err != nil {
-		return fmt.Errorf("check projects table schema: %w", err)
-	}
-	for rows.Next() {
-		var cid int
-		var name string
-		var typ, notnull, dfltValue, pk interface{}
-		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan table_info: %w", err)
-		}
-		if name == "workplace" {
-			hasWorkplaceColumn = true
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate table_info: %w", err)
-	}
-	rows.Close()
-
-	if !hasWorkplaceColumn {
-		if _, err := r.db.Exec(`ALTER TABLE projects ADD COLUMN workplace TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("migrate projects table with workplace column: %w", err)
-		}
-	}
-
 	var hasStateColumn bool
-	rows, err = r.db.Query(`PRAGMA table_info(agents)`)
+	rows, err := r.db.Query(`PRAGMA table_info(agents)`)
 	if err != nil {
 		return fmt.Errorf("check agents table schema: %w", err)
 	}
