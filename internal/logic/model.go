@@ -5,6 +5,7 @@ import (
 	eventbus "MattiasHognas/Kennel/internal/events"
 	agent "MattiasHognas/Kennel/internal/workers"
 	"database/sql"
+	"time"
 
 	"fmt"
 	"os"
@@ -15,13 +16,18 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+type ActivityEntry struct {
+	Timestamp string
+	Text      string
+}
+
 type Project struct {
 	ProjectID  int64
 	Name       string
 	State      agent.AgentState
 	Agents     []agent.AgentContract
 	AgentIDs   []int64
-	Activities []string
+	Activities []ActivityEntry
 }
 
 type ActivitySource struct {
@@ -71,7 +77,7 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 	m := Model{
 		projectTable:  newProjectTable(blurredStyles),
 		agentTable:    newSingleColumnTable("Agents", DefaultAgentWidth, blurredStyles),
-		activityTable: newSingleColumnTable("Activity", DefaultActivityWidth, blurredStyles),
+		activityTable: newActivityTable("Activity", DefaultActivityWidth, blurredStyles),
 		focusedStyles: focusedStyles,
 		blurredStyles: blurredStyles,
 		projects:      projects,
@@ -119,6 +125,18 @@ func newProjectTable(styles table.Styles) table.Model {
 		}),
 		table.WithStyles(styles),
 		table.WithWidth(DefaultProjectWidth),
+		table.WithHeight(DefaultTableHeight),
+	)
+}
+
+func newActivityTable(title string, width int, styles table.Styles) table.Model {
+	return table.New(
+		table.WithColumns([]table.Column{
+			{Title: "Time", Width: 10},
+			{Title: title, Width: max(12, width-2-12)},
+		}),
+		table.WithStyles(styles),
+		table.WithWidth(width),
 		table.WithHeight(DefaultTableHeight),
 	)
 }
@@ -252,7 +270,10 @@ func (m *Model) ResizeTables(width, height int) {
 
 	m.activityTable.SetWidth(activityWidth)
 	m.activityTable.SetHeight(tableHeight)
-	m.activityTable.SetColumns([]table.Column{{Title: "Activity", Width: max(24, activityWidth-2)}})
+	m.activityTable.SetColumns([]table.Column{
+		{Title: "Time", Width: 10},
+		{Title: "Activity", Width: max(24, activityWidth-2-12)},
+	})
 }
 
 func (m *Model) SetFocus(index int) {
@@ -304,10 +325,10 @@ func (m *Model) refreshSelectedProjectTables() {
 
 	activityRows := make([]table.Row, 0, len(project.Activities))
 	for i := len(project.Activities) - 1; i >= 0; i-- {
-		activityRows = append(activityRows, table.Row{project.Activities[i]})
+		activityRows = append(activityRows, table.Row{project.Activities[i].Timestamp, project.Activities[i].Text})
 	}
 	if len(activityRows) == 0 {
-		activityRows = append(activityRows, table.Row{"No activity yet"})
+		activityRows = append(activityRows, table.Row{"-", "No activity yet"})
 	}
 	m.activityTable.SetRows(activityRows)
 }
@@ -402,7 +423,10 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 	}
 
 	activityText := fmt.Sprintf("%s: %s", project.Agents[source.agentIndex].Name(), text)
-	project.Activities = append(project.Activities, activityText)
+	project.Activities = append(project.Activities, ActivityEntry{
+		Timestamp: time.Now().Format("15:04:05"),
+		Text:      activityText,
+	})
 	m.persistActivity(project, source.agentIndex, activityText)
 
 	m.refreshProjectAndSelection(source.projectIndex)
@@ -501,7 +525,10 @@ func (m Model) Shutdown() {
 
 			agentInstance.Stop()
 			activityText := fmt.Sprintf("%s: stopped", agentInstance.Name())
-			project.Activities = append(project.Activities, activityText)
+			project.Activities = append(project.Activities, ActivityEntry{
+				Timestamp: time.Now().Format("15:04:05"),
+				Text:      activityText,
+			})
 			m.persistActivity(project, agentIndex, activityText)
 		}
 		m.persistProjectAgentStates(project)

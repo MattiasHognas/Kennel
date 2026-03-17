@@ -58,7 +58,7 @@ func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 	if project.Activities[0].Text != "Runner: stopped" {
 		t.Fatalf("stored activity = %q, want %q", project.Activities[0].Text, "Runner: stopped")
 	}
-	if len(m.projects[0].Activities) != 1 || m.projects[0].Activities[0] != "Runner: stopped" {
+	if len(m.projects[0].Activities) != 1 || m.projects[0].Activities[0].Text != "Runner: stopped" {
 		t.Fatalf("model activities = %#v, want one stored stop activity", m.projects[0].Activities)
 	}
 	if m.projects[0].State != agent.Stopped {

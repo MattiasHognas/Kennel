@@ -75,22 +75,34 @@ func sampleProjects() []model.Project {
 	projectDefinitions := []struct {
 		name       string
 		agents     []string
-		activities []string
+		activities []model.ActivityEntry
 	}{
 		{
-			name:       "Barky barky",
-			agents:     []string{"Planner", "UX", "Frontend Developer", "QA", "DevOps"},
-			activities: []string{"Project created", "Planner: defined initial scope", "UX: sketched primary workflow"},
+			name:   "Barky barky",
+			agents: []string{"Planner", "UX", "Frontend Developer", "QA", "DevOps"},
+			activities: []model.ActivityEntry{
+				{Timestamp: "08:00:00", Text: "Project created"},
+				{Timestamp: "08:05:00", Text: "Planner: defined initial scope"},
+				{Timestamp: "08:10:00", Text: "UX: sketched primary workflow"},
+			},
 		},
 		{
-			name:       "Sniff sniff",
-			agents:     []string{"Planner", "Backend Developer", "QA"},
-			activities: []string{"Project created", "Planner: prepared backlog", "Backend Developer: designed API contract"},
+			name:   "Sniff sniff",
+			agents: []string{"Planner", "Backend Developer", "QA"},
+			activities: []model.ActivityEntry{
+				{Timestamp: "09:00:00", Text: "Project created"},
+				{Timestamp: "09:15:00", Text: "Planner: prepared backlog"},
+				{Timestamp: "09:30:00", Text: "Backend Developer: designed API contract"},
+			},
 		},
 		{
-			name:       "Grr Grr",
-			agents:     []string{"Planning", "Backend Developer 1", "Backend Developer 2", "QA", "DevOps"},
-			activities: []string{"Project created", "Planning: split delivery phases", "DevOps: prepared deployment pipeline"},
+			name:   "Grr Grr",
+			agents: []string{"Planning", "Backend Developer 1", "Backend Developer 2", "QA", "DevOps"},
+			activities: []model.ActivityEntry{
+				{Timestamp: "10:00:00", Text: "Project created"},
+				{Timestamp: "10:10:00", Text: "Planning: split delivery phases"},
+				{Timestamp: "10:30:00", Text: "DevOps: prepared deployment pipeline"},
+			},
 		},
 	}
 
@@ -105,7 +117,7 @@ func sampleProjects() []model.Project {
 			Name:       definition.name,
 			State:      agent.Stopped,
 			Agents:     agents,
-			Activities: append([]string(nil), definition.activities...),
+			Activities: append([]model.ActivityEntry(nil), definition.activities...),
 		})
 	}
 
@@ -149,9 +161,12 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 			agentIDs = append(agentIDs, storedAgent.ID)
 		}
 
-		activities := make([]string, 0, len(storedProject.Activities))
+		activities := make([]model.ActivityEntry, 0, len(storedProject.Activities))
 		for _, activity := range storedProject.Activities {
-			activities = append(activities, activity.Text)
+			activities = append(activities, model.ActivityEntry{
+				Timestamp: activity.CreatedAt.Format("15:04:05"),
+				Text:      activity.Text,
+			})
 		}
 
 		projects = append(projects, model.Project{
@@ -180,7 +195,7 @@ func seedSampleProjects(repository *repository.SQLiteRepository) error {
 		}
 
 		for _, activity := range definition.Activities {
-			if _, err := repository.NewActivity(project.ID, sql.NullInt64{}, activity); err != nil {
+			if _, err := repository.NewActivity(project.ID, sql.NullInt64{}, activity.Text); err != nil {
 				return err
 			}
 		}
