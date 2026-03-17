@@ -3,7 +3,7 @@
 Kennel is a framework for orchestrating AI agents.
 
 ### Development
-Run test
+Run tests
 ```go
 go test ./...
 ```
