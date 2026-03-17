@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	repository "MattiasHognas/Kennel/internal/data"
-	logic "MattiasHognas/Kennel/internal/logic"
 	model "MattiasHognas/Kennel/internal/logic"
 	table "MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
@@ -20,7 +19,7 @@ func main() {
 	p := tea.NewProgram(m)
 	finalModel, err := p.Run()
 	shutdownModel := m
-	if persistedModel, ok := finalModel.(logic.Model); ok {
+	if persistedModel, ok := finalModel.(model.Model); ok {
 		shutdownModel = persistedModel
 	}
 	shutdownModel.Shutdown()
@@ -31,16 +30,16 @@ func main() {
 	}
 }
 
-func initialModel() (logic.Model, func()) {
+func initialModel() (model.Model, func()) {
 	focusedStyles, blurredStyles := newTableStyles()
 	repository, err := repository.NewSQLiteRepository("data/kennel.db")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to initialize repository: %v", err))
 	}
 	sampleProjects := loadProjects(repository)
-	m := logic.NewModel(focusedStyles, blurredStyles, sampleProjects, repository)
+	m := model.NewModel(focusedStyles, blurredStyles, sampleProjects, repository)
 
-	m.ResizeTables(logic.DefaultProjectWidth+logic.DefaultAgentWidth+logic.DefaultActivityWidth, logic.DefaultTableHeight+logic.FooterHeight+4)
+	m.ResizeTables(model.DefaultProjectWidth+model.DefaultAgentWidth+model.DefaultActivityWidth, model.DefaultTableHeight+model.FooterHeight+4)
 	m.SetFocus(0)
 
 	cleanup := func() {
