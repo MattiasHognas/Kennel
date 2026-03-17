@@ -2,6 +2,17 @@
 
 Kennel is a framework for orchestrating AI agents.
 
+### Development
+Run tests
+```go
+go test ./...
+```
+Code coverage
+```go
+go test -coverprofile="coverage.out" ./...
+go tool cover -html="coverage.out"
+```
+
 ## Features to come
 
 ### As a user you get

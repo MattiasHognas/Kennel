@@ -12,7 +12,6 @@ type AgentState int
 const (
 	Stopped AgentState = iota
 	Running
-	Paused
 )
 
 const (
@@ -24,7 +23,6 @@ const (
 type AgentContract interface {
 	Name() string
 	Run() eventbus.EventChan
-	Pause() AgentState
 	Stop() AgentState
 	State() AgentState
 	SubscribeActivity() eventbus.EventChan
@@ -62,21 +60,9 @@ func (a *Agent) Run() eventbus.EventChan {
 	return a.activityCh
 }
 
-func (a *Agent) Pause() AgentState {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.state == Stopped {
-		return a.state
-	}
-
-	a.state = Paused
-	a.eventBus.Publish(activityTopic, eventbus.Event{Payload: "paused"})
-	return a.state
-}
-
 func (a *Agent) Stop() AgentState {
 	a.mu.Lock()
+	wasRunning := a.started || a.state == Running
 	if a.started {
 		close(a.stopCh)
 		a.started = false
@@ -86,7 +72,9 @@ func (a *Agent) Stop() AgentState {
 	a.sequence = 0
 	a.mu.Unlock()
 
-	a.publishActivity("stopped")
+	if wasRunning {
+		a.publishActivity("stopped")
+	}
 	return Stopped
 }
 
@@ -104,8 +92,6 @@ func (a AgentState) String() string {
 	switch a {
 	case Running:
 		return "running"
-	case Paused:
-		return "paused"
 	default:
 		return "stopped"
 	}
