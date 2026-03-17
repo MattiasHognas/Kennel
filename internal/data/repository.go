@@ -61,6 +61,14 @@ func NewSQLiteRepository(dsn string) (*SQLiteRepository, error) {
 		return nil, fmt.Errorf("ping sqlite connection: %w", err)
 	}
 
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable foreign keys: %w", err)
+	}
+
 	repository := &SQLiteRepository{db: db}
 	if err := repository.ensureSchema(); err != nil {
 		_ = db.Close()
@@ -75,6 +83,20 @@ func (r *SQLiteRepository) Close() error {
 		return nil
 	}
 	return r.db.Close()
+}
+
+func (r *SQLiteRepository) ProjectExists(projectID int64) error {
+	if projectID <= 0 {
+		return errors.New("project id must be positive")
+	}
+	var exists bool
+	if err := r.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?)`, projectID).Scan(&exists); err != nil {
+		return fmt.Errorf("check project existence: %w", err)
+	}
+	if !exists {
+		return ErrProjectNotFound
+	}
+	return nil
 }
 
 func (r *SQLiteRepository) CreateProject(name string) (Project, error) {
@@ -105,7 +127,7 @@ func (r *SQLiteRepository) AddAgentToProject(projectID int64, name string) (Agen
 		return Agent{}, errors.New("agent name cannot be empty")
 	}
 
-	if _, err := r.ReadProject(projectID); err != nil {
+	if err := r.ProjectExists(projectID); err != nil {
 		return Agent{}, err
 	}
 
@@ -172,7 +194,7 @@ func (r *SQLiteRepository) NewActivity(projectID int64, agentID sql.NullInt64, t
 		return Activity{}, errors.New("activity text cannot be empty")
 	}
 
-	if _, err := r.ReadProject(projectID); err != nil {
+	if err := r.ProjectExists(projectID); err != nil {
 		return Activity{}, err
 	}
 
@@ -260,24 +282,29 @@ func (r *SQLiteRepository) ReadProjects() ([]Project, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query projects: %w", err)
 	}
-	defer rows.Close()
 
-	projects := make([]Project, 0)
+	var ids []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("scan project id: %w", err)
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate projects: %w", err)
+	}
+	rows.Close()
 
+	projects := make([]Project, 0, len(ids))
+	for _, id := range ids {
 		project, err := r.ReadProject(id)
 		if err != nil {
 			return nil, err
 		}
 		projects = append(projects, project)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate projects: %w", err)
 	}
 
 	return projects, nil
@@ -342,8 +369,6 @@ func (r *SQLiteRepository) readActivities(projectID int64) ([]Activity, error) {
 
 func (r *SQLiteRepository) ensureSchema() error {
 	const schema = `
-	PRAGMA foreign_keys = ON;
-
 	CREATE TABLE IF NOT EXISTS projects (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL,
@@ -378,8 +403,34 @@ func (r *SQLiteRepository) ensureSchema() error {
 		return fmt.Errorf("create sqlite schema: %w", err)
 	}
 
-	if _, err := r.db.Exec(`ALTER TABLE agents ADD COLUMN state TEXT NOT NULL DEFAULT 'stopped'`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
-		return fmt.Errorf("migrate agents table with state column: %w", err)
+	var hasStateColumn bool
+	rows, err := r.db.Query(`PRAGMA table_info(agents)`)
+	if err != nil {
+		return fmt.Errorf("check agents table schema: %w", err)
+	}
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ, notnull, dflt_value, pk interface{}
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt_value, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "state" {
+			hasStateColumn = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate table_info: %w", err)
+	}
+	rows.Close()
+
+	if !hasStateColumn {
+		if _, err := r.db.Exec(`ALTER TABLE agents ADD COLUMN state TEXT NOT NULL DEFAULT 'stopped'`); err != nil {
+			return fmt.Errorf("migrate agents table with state column: %w", err)
+		}
 	}
 
 	if _, err := r.db.Exec(`UPDATE agents SET state = 'stopped' WHERE lower(state) = 'paused'`); err != nil {

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 
 	"fmt"
+	"os"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/table"
@@ -403,9 +404,6 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 	activityText := fmt.Sprintf("%s: %s", project.Agents[source.agentIndex].Name(), text)
 	project.Activities = append(project.Activities, activityText)
 	m.persistActivity(project, source.agentIndex, activityText)
-	if len(project.Activities) > 100 {
-		project.Activities = project.Activities[len(project.Activities)-100:]
-	}
 
 	m.refreshProjectAndSelection(source.projectIndex)
 }
@@ -472,7 +470,9 @@ func (m *Model) persistProjectAgentStates(project *Project) {
 			continue
 		}
 
-		_ = m.repository.UpdateAgentState(agentID, project.Agents[i].State().String())
+		if err := m.repository.UpdateAgentState(agentID, project.Agents[i].State().String()); err != nil {
+			fmt.Fprintf(os.Stderr, "persist agent state: %v\n", err)
+		}
 	}
 }
 
@@ -486,7 +486,9 @@ func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
 		agentID = sql.NullInt64{Int64: project.AgentIDs[agentIndex], Valid: true}
 	}
 
-	_, _ = m.repository.NewActivity(project.ProjectID, agentID, text)
+	if _, err := m.repository.NewActivity(project.ProjectID, agentID, text); err != nil {
+		fmt.Fprintf(os.Stderr, "persist activity: %v\n", err)
+	}
 }
 
 func (m Model) Shutdown() {
@@ -500,9 +502,6 @@ func (m Model) Shutdown() {
 			agentInstance.Stop()
 			activityText := fmt.Sprintf("%s: stopped", agentInstance.Name())
 			project.Activities = append(project.Activities, activityText)
-			if len(project.Activities) > 100 {
-				project.Activities = project.Activities[len(project.Activities)-100:]
-			}
 			m.persistActivity(project, agentIndex, activityText)
 		}
 		m.persistProjectAgentStates(project)

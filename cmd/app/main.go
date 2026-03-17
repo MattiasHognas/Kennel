@@ -116,18 +116,25 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
 	storedProjects, err := repository.ReadProjects()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to read projects, falling back to samples: %v\n", err)
 		_ = repository.Close()
 		return sampleProjects()
 	}
 
 	if len(storedProjects) == 0 {
 		if err := seedSampleProjects(repository); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to seed sample projects, falling back to samples: %v\n", err)
 			_ = repository.Close()
 			return sampleProjects()
 		}
 
 		storedProjects, err = repository.ReadProjects()
 		if err != nil || len(storedProjects) == 0 {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to read seeded projects, falling back to samples: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "failed to read seeded projects (empty), falling back to samples\n")
+			}
 			_ = repository.Close()
 			return sampleProjects()
 		}
