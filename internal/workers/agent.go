@@ -62,6 +62,7 @@ func (a *Agent) Run() eventbus.EventChan {
 
 func (a *Agent) Stop() AgentState {
 	a.mu.Lock()
+	wasRunning := a.started || a.state == Running
 	if a.started {
 		close(a.stopCh)
 		a.started = false
@@ -71,7 +72,9 @@ func (a *Agent) Stop() AgentState {
 	a.sequence = 0
 	a.mu.Unlock()
 
-	a.publishActivity("stopped")
+	if wasRunning {
+		a.publishActivity("stopped")
+	}
 	return Stopped
 }
 

@@ -488,3 +488,26 @@ func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
 
 	_, _ = m.repository.NewActivity(project.ProjectID, agentID, text)
 }
+
+func (m Model) Shutdown() {
+	for i := range m.projects {
+		project := &m.projects[i]
+		for agentIndex, agentInstance := range project.Agents {
+			if agentInstance.State() != agent.Running {
+				continue
+			}
+
+			agentInstance.Stop()
+			activityText := fmt.Sprintf("%s: stopped", agentInstance.Name())
+			project.Activities = append(project.Activities, activityText)
+			if len(project.Activities) > 100 {
+				project.Activities = project.Activities[len(project.Activities)-100:]
+			}
+			m.persistActivity(project, agentIndex, activityText)
+		}
+		m.persistProjectAgentStates(project)
+	}
+	for i := range m.projects {
+		m.syncProjectState(i)
+	}
+}

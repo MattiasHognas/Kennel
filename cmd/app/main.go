@@ -17,10 +17,17 @@ import (
 
 func main() {
 	m, cleanup := initialModel()
-	defer cleanup()
 
 	p := tea.NewProgram(m)
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	shutdownModel := m
+	if persistedModel, ok := finalModel.(logic.Model); ok {
+		shutdownModel = persistedModel
+	}
+	shutdownModel.Shutdown()
+	cleanup()
+
+	if err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)
 	}
