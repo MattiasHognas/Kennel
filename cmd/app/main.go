@@ -170,6 +170,7 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 			Name:         storedProject.Name,
 			Workplace:    storedProject.Workplace,
 			Instructions: storedProject.Instructions,
+			State:        agent.Stopped,
 			Agents:       agents,
 			AgentIDs:     agentIDs,
 			Activities:   activities,

@@ -102,12 +102,21 @@ func (r *SQLiteRepository) ProjectExists(projectID int64) error {
 }
 
 func (r *SQLiteRepository) CreateProject(name string) (Project, error) {
+	return r.CreateProjectConfiguration(name, "", "")
+}
+
+func (r *SQLiteRepository) CreateProjectConfiguration(name, workplace, instructions string) (Project, error) {
 	name = strings.TrimSpace(name)
+	workplace = strings.TrimSpace(workplace)
+	instructions = strings.TrimSpace(instructions)
 	if name == "" {
 		return Project{}, errors.New("project name cannot be empty")
 	}
 
-	result, err := r.db.Exec(`INSERT INTO projects(name, workplace, instructions) VALUES (?, '', '')`, name)
+	result, err := r.db.Exec(`
+		INSERT INTO projects(name, workplace, instructions)
+		VALUES (?, ?, ?)
+	`, name, workplace, instructions)
 	if err != nil {
 		return Project{}, fmt.Errorf("insert project: %w", err)
 	}
@@ -160,19 +169,23 @@ func (r *SQLiteRepository) AddAgentToProject(projectID int64, name string) (Agen
 	return agent, nil
 }
 
-func (r *SQLiteRepository) UpdateProjectConfiguration(projectID int64, workplace, instructions string) error {
+func (r *SQLiteRepository) UpdateProjectConfiguration(projectID int64, name, workplace, instructions string) error {
 	if projectID <= 0 {
 		return errors.New("project id must be positive")
 	}
 
+	name = strings.TrimSpace(name)
 	workplace = strings.TrimSpace(workplace)
 	instructions = strings.TrimSpace(instructions)
+	if name == "" {
+		return errors.New("project name cannot be empty")
+	}
 
 	result, err := r.db.Exec(`
 		UPDATE projects
-		SET workplace = ?, instructions = ?
+		SET name = ?, workplace = ?, instructions = ?
 		WHERE id = ?
-	`, workplace, instructions, projectID)
+	`, name, workplace, instructions, projectID)
 	if err != nil {
 		return fmt.Errorf("update project configuration: %w", err)
 	}
@@ -435,8 +448,47 @@ func (r *SQLiteRepository) ensureSchema() error {
 		return fmt.Errorf("create sqlite schema: %w", err)
 	}
 
+	var hasWorkplaceColumn bool
+	var hasInstructionsColumn bool
+	rows, err := r.db.Query(`PRAGMA table_info(projects)`)
+	if err != nil {
+		return fmt.Errorf("check projects table schema: %w", err)
+	}
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ, notnull, dfltValue, pk interface{}
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "workplace" {
+			hasWorkplaceColumn = true
+		}
+		if name == "instructions" {
+			hasInstructionsColumn = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate table_info: %w", err)
+	}
+	rows.Close()
+
+	if !hasWorkplaceColumn {
+		if _, err := r.db.Exec(`ALTER TABLE projects ADD COLUMN workplace TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate projects table with workplace column: %w", err)
+		}
+	}
+
+	if !hasInstructionsColumn {
+		if _, err := r.db.Exec(`ALTER TABLE projects ADD COLUMN instructions TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate projects table with instructions column: %w", err)
+		}
+	}
+
 	var hasStateColumn bool
-	rows, err := r.db.Query(`PRAGMA table_info(agents)`)
+	rows, err = r.db.Query(`PRAGMA table_info(agents)`)
 	if err != nil {
 		return fmt.Errorf("check agents table schema: %w", err)
 	}
