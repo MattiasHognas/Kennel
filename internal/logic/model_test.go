@@ -7,6 +7,8 @@ import (
 	repository "MattiasHognas/Kennel/internal/data"
 	"MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
@@ -62,6 +64,57 @@ func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 	}
 	if m.projects[0].State != agent.Stopped {
 		t.Fatalf("model project state = %s, want %s", m.projects[0].State, agent.Stopped)
+	}
+}
+
+func TestEnterOpensProjectEditorAndClickingOKPersistsWorkplace(t *testing.T) {
+	repo := newTestRepository(t)
+
+	storedProject, err := repo.CreateProject("Configured Project")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
+		ProjectID: storedProject.ID,
+		Name:      storedProject.Name,
+	}}, repo)
+	m.SetFocus(0)
+
+	openedModel, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd != nil {
+		cmd()
+	}
+	updatedModel, ok := openedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", openedModel)
+	}
+	if updatedModel.mode != projectEditorViewMode {
+		t.Fatalf("mode = %v, want projectEditorViewMode", updatedModel.mode)
+	}
+
+	updatedModel.projectEditor.workplaceInput.SetValue(`C:\work\kennel`)
+	clickedModel, saveCmd := updatedModel.Update(tea.MouseClickMsg(tea.Mouse{X: 1, Y: 5}))
+	if saveCmd != nil {
+		saveCmd()
+	}
+	updatedModel, ok = clickedModel.(Model)
+	if !ok {
+		t.Fatalf("clicked model type = %T, want Model", clickedModel)
+	}
+	if updatedModel.mode != tableViewMode {
+		t.Fatalf("mode after save = %v, want tableViewMode", updatedModel.mode)
+	}
+	if updatedModel.projects[0].Workplace != `C:\work\kennel` {
+		t.Fatalf("model workplace = %q, want %q", updatedModel.projects[0].Workplace, `C:\work\kennel`)
+	}
+
+	persistedProject, err := repo.ReadProject(storedProject.ID)
+	if err != nil {
+		t.Fatalf("read project after save: %v", err)
+	}
+	if persistedProject.Workplace != `C:\work\kennel` {
+		t.Fatalf("stored workplace = %q, want %q", persistedProject.Workplace, `C:\work\kennel`)
 	}
 }
 

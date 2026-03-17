@@ -56,6 +56,9 @@ func assertProjectShape(t *testing.T, got, want []model.Project) {
 		if got[i].Name != want[i].Name {
 			t.Fatalf("project %d name = %q, want %q", i, got[i].Name, want[i].Name)
 		}
+		if got[i].Workplace != want[i].Workplace {
+			t.Fatalf("project %q workplace = %q, want %q", got[i].Name, got[i].Workplace, want[i].Workplace)
+		}
 		if len(got[i].Agents) != len(want[i].Agents) {
 			t.Fatalf("project %q agent count = %d, want %d", got[i].Name, len(got[i].Agents), len(want[i].Agents))
 		}
@@ -75,6 +78,9 @@ func assertStoredProjectShape(t *testing.T, got []repository.Project, want []mod
 	for i := range want {
 		if got[i].Name != want[i].Name {
 			t.Fatalf("stored project %d name = %q, want %q", i, got[i].Name, want[i].Name)
+		}
+		if got[i].Workplace != want[i].Workplace {
+			t.Fatalf("stored project %q workplace = %q, want %q", got[i].Name, got[i].Workplace, want[i].Workplace)
 		}
 		if len(got[i].Agents) != len(want[i].Agents) {
 			t.Fatalf("stored project %q agent count = %d, want %d", got[i].Name, len(got[i].Agents), len(want[i].Agents))

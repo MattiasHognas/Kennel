@@ -1,18 +1,19 @@
 package model
 
 import (
-	repository "MattiasHognas/Kennel/internal/data"
-	eventbus "MattiasHognas/Kennel/internal/events"
-	agent "MattiasHognas/Kennel/internal/workers"
 	"database/sql"
-	"time"
-
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
+	repository "MattiasHognas/Kennel/internal/data"
+	eventbus "MattiasHognas/Kennel/internal/events"
 	"MattiasHognas/Kennel/internal/ui/table"
+	agent "MattiasHognas/Kennel/internal/workers"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -25,10 +26,24 @@ type ActivityEntry struct {
 type Project struct {
 	ProjectID  int64
 	Name       string
+	Workplace  string
 	State      agent.AgentState
 	Agents     []agent.AgentContract
 	AgentIDs   []int64
 	Activities []ActivityEntry
+}
+
+type viewMode int
+
+const (
+	tableViewMode viewMode = iota
+	projectEditorViewMode
+)
+
+type projectEditor struct {
+	workplaceInput textinput.Model
+	focusIndex     int
+	errorMessage   string
 }
 
 type ActivitySource struct {
@@ -46,6 +61,7 @@ type Keymap struct {
 	quit          key.Binding
 	nextTable     key.Binding
 	prevTable     key.Binding
+	editProject   key.Binding
 	startProject  key.Binding
 	stopProject   key.Binding
 	toggleProject key.Binding
@@ -64,6 +80,8 @@ type Model struct {
 	windowHeight  int
 	keymap        Keymap
 	repository    *repository.SQLiteRepository
+	mode          viewMode
+	projectEditor projectEditor
 }
 
 const (
@@ -84,6 +102,7 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 		blurredStyles: blurredStyles,
 		projects:      projects,
 		repository:    repository,
+		projectEditor: newProjectEditor(),
 		keymap: Keymap{
 			quit: key.NewBinding(
 				key.WithKeys("esc", "ctrl+c", "q"),
@@ -97,6 +116,10 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 				key.WithKeys("shift+tab", "left", "h"),
 				key.WithHelp("shift+tab/left", "prev table"),
 			),
+			editProject: key.NewBinding(
+				key.WithKeys("enter"),
+				key.WithHelp("enter", "edit project"),
+			),
 			startProject: key.NewBinding(
 				key.WithKeys("s"),
 				key.WithHelp("s", "start project"),
@@ -106,8 +129,8 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 				key.WithHelp("p", "stop project"),
 			),
 			toggleProject: key.NewBinding(
-				key.WithKeys("enter", "space"),
-				key.WithHelp("enter", "toggle project"),
+				key.WithKeys("space"),
+				key.WithHelp("space", "toggle project"),
 			),
 		},
 	}
@@ -116,7 +139,17 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 	m.syncAllProjectStates()
 	m.refreshProjectTable()
 	m.refreshSelectedProjectTables()
+	m.resizeProjectEditor()
 	return m
+}
+
+func newProjectEditor() projectEditor {
+	input := textinput.New()
+	input.Placeholder = `C:\path\to\workspace`
+	input.CharLimit = 512
+	input.SetWidth(DefaultActivityWidth)
+
+	return projectEditor{workplaceInput: input}
 }
 
 func newProjectTable(styles table.Styles) table.Model {
@@ -184,13 +217,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case activityMsg:
 		m.recordActivity(msg.source, msg.text)
 		return m, waitForActivity(msg.source)
+	}
 
-	case tea.KeyPressMsg:
-		if shouldStop, handled := m.handleKeyPress(msg); handled {
+	if m.mode == projectEditorViewMode {
+		return m.updateProjectEditor(msg)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		if shouldStop, handled, cmd := m.handleKeyPress(keyMsg); handled {
 			if shouldStop {
 				return m, tea.Quit
 			}
-			return m, nil
+			return m, cmd
 		}
 	}
 
@@ -224,19 +262,29 @@ func (m Model) updateTables(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() tea.View {
+	if m.mode == projectEditorViewMode {
+		v := tea.NewView(m.projectEditorView())
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+		return v
+	}
+
 	header := fmt.Sprintf("Selected project: %s", m.selectedProjectSummary())
+	workplace := fmt.Sprintf("Workplace: %s", m.selectedProjectWorkplaceSummary())
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
 		header,
+		workplace,
 		"",
 		lipgloss.JoinHorizontal(lipgloss.Top, m.tableViews()...),
 		"",
-		"tab/shift+tab switches tables, s starts, p stops, enter toggles the selected project.",
+		"tab/shift+tab switches tables, enter edits the selected project, space toggles it, s starts, p stops.",
 		"Activities come from agents and are shown for the currently selected project.",
 	)
 
 	v := tea.NewView(content)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
@@ -284,6 +332,8 @@ func (m *Model) ResizeTables(width, height int) {
 		{Title: "Time", Width: 10},
 		{Title: "Activity", Width: max(24, activityWidth-2-12)},
 	})
+
+	m.resizeProjectEditor()
 }
 
 func (m *Model) SetFocus(index int) {
@@ -380,6 +430,14 @@ func (m *Model) selectedProjectSummary() string {
 	return fmt.Sprintf("%s (%s)", project.Name, project.State)
 }
 
+func (m *Model) selectedProjectWorkplaceSummary() string {
+	project := m.selectedProject()
+	if project == nil || strings.TrimSpace(project.Workplace) == "" {
+		return "not set"
+	}
+	return project.Workplace
+}
+
 func (m *Model) startSelectedProject() {
 	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
@@ -442,28 +500,164 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 	m.refreshProjectAndSelection(source.projectIndex)
 }
 
-func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bool) {
+func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bool, cmd tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keymap.quit):
-		return true, true
+		return true, true, nil
 	case key.Matches(msg, m.keymap.nextTable):
 		m.SetFocus(m.focusIndex + 1)
-		return false, true
+		return false, true, nil
 	case key.Matches(msg, m.keymap.prevTable):
 		m.SetFocus(m.focusIndex - 1)
-		return false, true
+		return false, true, nil
+	case key.Matches(msg, m.keymap.editProject):
+		if m.focusIndex == 0 {
+			return false, true, m.openSelectedProjectEditor()
+		}
+		return false, false, nil
 	case key.Matches(msg, m.keymap.startProject):
 		m.startSelectedProject()
-		return false, true
+		return false, true, nil
 	case key.Matches(msg, m.keymap.stopProject):
 		m.stopSelectedProject()
-		return false, true
+		return false, true, nil
 	case key.Matches(msg, m.keymap.toggleProject):
 		m.toggleSelectedProject()
-		return false, true
+		return false, true, nil
 	default:
-		return false, false
+		return false, false, nil
 	}
+}
+
+func (m *Model) openSelectedProjectEditor() tea.Cmd {
+	project := m.selectedProject()
+	if project == nil {
+		return nil
+	}
+
+	m.mode = projectEditorViewMode
+	m.projectEditor.errorMessage = ""
+	m.projectEditor.workplaceInput.SetValue(project.Workplace)
+	m.projectEditor.workplaceInput.CursorEnd()
+	return m.setProjectEditorFocus(0)
+}
+
+func (m *Model) closeSelectedProjectEditor() {
+	m.mode = tableViewMode
+	m.projectEditor.errorMessage = ""
+	m.projectEditor.workplaceInput.Blur()
+}
+
+func (m *Model) setProjectEditorFocus(index int) tea.Cmd {
+	m.projectEditor.focusIndex = ((index % 2) + 2) % 2
+	if m.projectEditor.focusIndex == 0 {
+		return m.projectEditor.workplaceInput.Focus()
+	}
+	m.projectEditor.workplaceInput.Blur()
+	return nil
+}
+
+func (m Model) projectEditorView() string {
+	project := m.selectedProject()
+	if project == nil {
+		return "No project selected."
+	}
+
+	lines := []string{
+		fmt.Sprintf("Edit project: %s", project.Name),
+		"",
+		"Workplace",
+		m.projectEditor.workplaceInput.View(),
+		"",
+		m.projectEditorOKButtonView(),
+	}
+
+	if m.projectEditor.errorMessage != "" {
+		lines = append(lines, "", m.projectEditor.errorMessage)
+	}
+
+	lines = append(lines, "", "tab switches focus, enter saves on OK, esc cancels, click OK to save.")
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) projectEditorOKButtonView() string {
+	button := "[ OK ]"
+	if m.projectEditor.focusIndex == 1 {
+		return lipgloss.NewStyle().Bold(true).Reverse(true).Render(button)
+	}
+	return lipgloss.NewStyle().Bold(true).Render(button)
+}
+
+func (m Model) projectEditorOKButtonBounds() (left int, top int, right int, bottom int) {
+	width := lipgloss.Width(m.projectEditorOKButtonView())
+	return 0, 5, max(0, width-1), 5
+}
+
+func (m *Model) updateProjectEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.MouseClickMsg:
+		mouse := msg.Mouse()
+		left, top, right, bottom := m.projectEditorOKButtonBounds()
+		if mouse.X >= left && mouse.X <= right && mouse.Y >= top && mouse.Y <= bottom {
+			return *m, m.saveSelectedProjectEditor()
+		}
+		return *m, nil
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "ctrl+c":
+			return *m, tea.Quit
+		case "esc":
+			m.closeSelectedProjectEditor()
+			return *m, nil
+		case "tab", "shift+tab", "up", "down":
+			step := 1
+			if msg.String() == "shift+tab" || msg.String() == "up" {
+				step = -1
+			}
+			return *m, m.setProjectEditorFocus(m.projectEditor.focusIndex + step)
+		case "enter":
+			if m.projectEditor.focusIndex == 1 {
+				return *m, m.saveSelectedProjectEditor()
+			}
+			return *m, m.setProjectEditorFocus(1)
+		}
+	}
+
+	if m.projectEditor.focusIndex == 0 {
+		var cmd tea.Cmd
+		m.projectEditor.workplaceInput, cmd = m.projectEditor.workplaceInput.Update(msg)
+		return *m, cmd
+	}
+
+	return *m, nil
+}
+
+func (m *Model) saveSelectedProjectEditor() tea.Cmd {
+	project := m.selectedProject()
+	if project == nil {
+		m.closeSelectedProjectEditor()
+		return nil
+	}
+
+	workplace := strings.TrimSpace(m.projectEditor.workplaceInput.Value())
+	if m.repository != nil && project.ProjectID > 0 {
+		if err := m.repository.UpdateProjectWorkplace(project.ProjectID, workplace); err != nil {
+			m.projectEditor.errorMessage = fmt.Sprintf("Save failed: %v", err)
+			return nil
+		}
+	}
+
+	project.Workplace = workplace
+	m.closeSelectedProjectEditor()
+	return nil
+}
+
+func (m *Model) resizeProjectEditor() {
+	inputWidth := max(24, m.windowWidth-2)
+	if inputWidth == 24 && m.windowWidth == 0 {
+		inputWidth = DefaultActivityWidth
+	}
+	m.projectEditor.workplaceInput.SetWidth(inputWidth)
 }
 
 func (m *Model) syncAllProjectStates() {
