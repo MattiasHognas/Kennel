@@ -478,57 +478,8 @@ func (r *SQLiteRepository) ensureSchema() error {
 		return fmt.Errorf("create sqlite schema: %w", err)
 	}
 
-	var hasProjectStateColumn bool
-	var hasWorkplaceColumn bool
-	var hasInstructionsColumn bool
-	rows, err := r.db.Query(`PRAGMA table_info(projects)`)
-	if err != nil {
-		return fmt.Errorf("check projects table schema: %w", err)
-	}
-	for rows.Next() {
-		var cid int
-		var name string
-		var typ, notnull, dfltValue, pk interface{}
-		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan table_info: %w", err)
-		}
-		if name == "state" {
-			hasProjectStateColumn = true
-		}
-		if name == "workplace" {
-			hasWorkplaceColumn = true
-		}
-		if name == "instructions" {
-			hasInstructionsColumn = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate table_info: %w", err)
-	}
-	rows.Close()
-
-	if !hasProjectStateColumn {
-		if _, err := r.db.Exec(`ALTER TABLE projects ADD COLUMN state TEXT NOT NULL DEFAULT 'stopped'`); err != nil {
-			return fmt.Errorf("migrate projects table with state column: %w", err)
-		}
-	}
-
-	if !hasWorkplaceColumn {
-		if _, err := r.db.Exec(`ALTER TABLE projects ADD COLUMN workplace TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("migrate projects table with workplace column: %w", err)
-		}
-	}
-
-	if !hasInstructionsColumn {
-		if _, err := r.db.Exec(`ALTER TABLE projects ADD COLUMN instructions TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("migrate projects table with instructions column: %w", err)
-		}
-	}
-
 	var hasStateColumn bool
-	rows, err = r.db.Query(`PRAGMA table_info(agents)`)
+	rows, err := r.db.Query(`PRAGMA table_info(agents)`)
 	if err != nil {
 		return fmt.Errorf("check agents table schema: %w", err)
 	}
