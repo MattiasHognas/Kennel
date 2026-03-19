@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 
 	eventbus "MattiasHognas/Kennel/internal/events"
 
@@ -29,6 +30,7 @@ func (f *FakeClient) Close() error { return nil }
 type Wrapper struct {
 	cmd     *exec.Cmd
 	conn    *acp.ClientSideConnection
+	handler *localClient
 	eb      *eventbus.EventBus
 	topic   string
 	session acp.SessionId
@@ -72,6 +74,7 @@ func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.
 	return &Wrapper{
 		cmd:     cmd,
 		conn:    conn,
+		handler: handler,
 		eb:      eb,
 		topic:   topic,
 		session: sessionRes.SessionId,
@@ -79,16 +82,48 @@ func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.
 }
 
 func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
-	_, err := w.conn.Prompt(ctx, acp.PromptRequest{
-		SessionId: w.session,
-		Prompt: []acp.ContentBlock{
-			acp.TextBlock(msg),
-		},
-	})
+	textChan := make(chan string, 100)
+
+	w.handler.mu.Lock()
+	// Channel to signal and stream text chunks
+	w.handler.textChan = textChan
+	w.handler.mu.Unlock()
+
+	errChan := make(chan error, 1)
+
+	go func() {
+		_, err := w.conn.Prompt(ctx, acp.PromptRequest{
+			SessionId: w.session,
+			Prompt: []acp.ContentBlock{
+				acp.TextBlock(msg),
+			},
+		})
+		// The acp-go-sdk signals termination here by returning from Prompt.
+		errChan <- err
+
+		w.handler.mu.Lock()
+		w.handler.textChan = nil
+		w.handler.mu.Unlock()
+
+		close(textChan)
+	}()
+
+	var sb strings.Builder
+	// Block and aggregate chunks until the agent finishes processing
+	for chunk := range textChan {
+		sb.WriteString(chunk)
+	}
+
+	err := <-errChan
 	if err != nil {
 		return "", err
 	}
-	return "Prompt sent successfully", nil
+
+	result := sb.String()
+	if result == "" {
+		return "Prompt sent successfully", nil
+	}
+	return result, nil
 }
 
 func (w *Wrapper) Close() error {
@@ -114,12 +149,29 @@ func FormatPrompt(msg string, activities []string) string {
 }
 
 type localClient struct {
-	eb    *eventbus.EventBus
-	topic string
+	mu       sync.Mutex
+	eb       *eventbus.EventBus
+	topic    string
+	textChan chan string
 }
 
 func (c *localClient) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
 	c.eb.Publish(c.topic, eventbus.Event{Payload: eventbus.WorkerMessageEvent{Chunk: "received update"}})
+
+	// Send text chunks to the waiting channel
+	if params.Update.AgentMessageChunk != nil {
+		if textBlock := params.Update.AgentMessageChunk.Content.Text; textBlock != nil {
+			c.mu.Lock()
+			ch := c.textChan
+			c.mu.Unlock()
+			if ch != nil {
+				func() {
+					defer func() { _ = recover() }()
+					ch <- textBlock.Text
+				}()
+			}
+		}
+	}
 	return nil
 }
 
