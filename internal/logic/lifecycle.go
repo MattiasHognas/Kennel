@@ -8,6 +8,8 @@ import (
 	agent "MattiasHognas/Kennel/internal/workers"
 )
 
+const agentsDir = "C:\\source\\Kennel"
+
 func (m *Model) startSelectedProject() {
 	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
@@ -19,7 +21,7 @@ func (m *Model) startSelectedProject() {
 	project.Runtime.CancelCtx = cancel
 
 	eb := eventbus.NewEventBus()
-	sup := supervisor.NewSupervisor(m.repository, eb, "./agents", project.Config.ProjectID, project.Config.Name)
+	sup := supervisor.NewSupervisor(m.repository, eb, agentsDir, project.Config.ProjectID, project.Config.Name)
 	project.Runtime.Supervisor = sup
 
 	var configuredAgents []string

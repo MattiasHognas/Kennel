@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	eventbus "MattiasHognas/Kennel/internal/events"
+
 	"github.com/coder/acp-go-sdk"
 )
 
@@ -63,7 +64,7 @@ func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.
 		return nil, fmt.Errorf("init: %w", err)
 	}
 
-	sessionRes, err := conn.NewSession(ctx, acp.NewSessionRequest{})
+	sessionRes, err := conn.NewSession(ctx, acp.NewSessionRequest{McpServers: []acp.McpServer{}})
 	if err != nil {
 		return nil, fmt.Errorf("session: %w", err)
 	}
