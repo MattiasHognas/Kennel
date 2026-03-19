@@ -13,7 +13,7 @@ import (
 func TestEnterOpensProjectEditorAndClickingOKPersistsWorkplace(t *testing.T) {
 	repo := newTestRepository(t)
 
-	storedProject, err := repo.CreateProject(context.Background(), "Configured Project")
+	storedProject, err := repo.CreateProject(context.Background(), "Configured Project", `C:\src\configured-project`, "initial instructions")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}

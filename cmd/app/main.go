@@ -50,63 +50,27 @@ func initialModel() (model.Model, func()) {
 }
 
 func sampleProjects() []model.Project {
-	projectDefinitions := []struct {
-		name       string
-		agents     []string
-		activities []model.ActivityEntry
-	}{
-		{
-			name:   "Barky barky",
-			agents: []string{"Planner", "UX", "Frontend Developer", "QA", "DevOps"},
-			activities: []model.ActivityEntry{
-				{Timestamp: "08:00:00", Text: "Project created"},
-				{Timestamp: "08:05:00", Text: "Planner: defined initial scope"},
-				{Timestamp: "08:10:00", Text: "UX: sketched primary workflow"},
-			},
-		},
-		{
-			name:   "Sniff sniff",
-			agents: []string{"Planner", "Backend Developer", "QA"},
-			activities: []model.ActivityEntry{
-				{Timestamp: "09:00:00", Text: "Project created"},
-				{Timestamp: "09:15:00", Text: "Planner: prepared backlog"},
-				{Timestamp: "09:30:00", Text: "Backend Developer: designed API contract"},
-			},
-		},
-		{
-			name:   "Grr Grr",
-			agents: []string{"Planning", "Backend Developer 1", "Backend Developer 2", "QA", "DevOps"},
-			activities: []model.ActivityEntry{
-				{Timestamp: "10:00:00", Text: "Project created"},
-				{Timestamp: "10:10:00", Text: "Planning: split delivery phases"},
-				{Timestamp: "10:30:00", Text: "DevOps: prepared deployment pipeline"},
-			},
-		},
-	}
 
-	projects := make([]model.Project, 0, len(projectDefinitions))
-	for _, definition := range projectDefinitions {
-		agents := make([]agent.AgentContract, 0, len(definition.agents))
-		for _, name := range definition.agents {
-			agents = append(agents, agent.NewAgent(name))
-		}
+	var seedConfig = model.ProjectConfig{Name: "Testing", Workplace: "C:\\source\\kennel\\test_project", Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes"}
 
-		projects = append(projects, model.Project{
-			Config: model.ProjectConfig{
-				Name:         definition.name,
-				Workplace:    "",
-				Instructions: "",
-			},
-			State: model.ProjectState{
-				State: agent.Stopped,
-			},
-			Runtime: model.ProjectRuntime{
-				Agents:     agents,
-				AgentIDs:   nil,
-				Activities: append([]model.ActivityEntry(nil), definition.activities...),
-			},
-		})
-	}
+	projects := make([]model.Project, 0)
+	agents := make([]agent.AgentContract, 0)
+
+	projects = append(projects, model.Project{
+		Config: model.ProjectConfig{
+			Name:         seedConfig.Name,
+			Workplace:    seedConfig.Workplace,
+			Instructions: seedConfig.Instructions,
+		},
+		State: model.ProjectState{
+			State: agent.Stopped,
+		},
+		Runtime: model.ProjectRuntime{
+			Agents:     agents,
+			AgentIDs:   nil,
+			Activities: []model.ActivityEntry{},
+		},
+	})
 
 	return projects
 }
@@ -176,7 +140,7 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
 func seedSampleProjects(repository *repository.SQLiteRepository) error {
 	for _, definition := range sampleProjects() {
-		project, err := repository.CreateProject(context.Background(), definition.Config.Name)
+		project, err := repository.CreateProject(context.Background(), definition.Config.Name, definition.Config.Workplace, definition.Config.Instructions)
 		if err != nil {
 			return err
 		}

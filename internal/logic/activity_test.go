@@ -11,7 +11,7 @@ import (
 func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 	repo := newTestRepository(t)
 
-	storedProject, err := repo.CreateProject(context.Background(), "Test Project")
+	storedProject, err := repo.CreateProject(context.Background(), "Test Project", `C:\src\test-project`, "first line\nsecond line")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}

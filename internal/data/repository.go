@@ -103,8 +103,8 @@ func (r *SQLiteRepository) ProjectExists(ctx context.Context, projectID int64) e
 	return nil
 }
 
-func (r *SQLiteRepository) CreateProject(ctx context.Context, name string) (Project, error) {
-	return r.CreateProjectConfiguration(ctx, name, "", "")
+func (r *SQLiteRepository) CreateProject(ctx context.Context, name, workplace, instructions string) (Project, error) {
+	return r.CreateProjectConfiguration(ctx, name, workplace, instructions)
 }
 
 func (r *SQLiteRepository) CreateProjectConfiguration(ctx context.Context, name, workplace, instructions string) (Project, error) {
@@ -563,4 +563,12 @@ func ensureDatabaseDirectory(dsn string) error {
 	}
 
 	return nil
+}
+
+func (r *SQLiteRepository) CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error {
+	_, err := r.db.ExecContext(ctx, `
+INSERT INTO supervisor_runs (project_id, status, checkpoint_data)
+VALUES (?, ?, ?)
+`, projectID, fmt.Sprintf("Step %d: %s", stepIndex, status), data)
+	return err
 }

@@ -53,7 +53,7 @@ func TestNewProjectWithoutAgentsCanToggleState(t *testing.T) {
 func TestFocusedAgentCyclesBetweenRunningAndStopped(t *testing.T) {
 	repo := newTestRepository(t)
 
-	projectRecord, err := repo.CreateProject(context.Background(), "With Agent")
+	projectRecord, err := repo.CreateProject(context.Background(), "With Agent", `C:\src\with-agent`, "first line\nsecond line")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestFocusedAgentCyclesBetweenRunningAndStopped(t *testing.T) {
 func TestCompletedStatesAreNotChangedByUserControls(t *testing.T) {
 	repo := newTestRepository(t)
 
-	projectRecord, err := repo.CreateProject(context.Background(), "Completed Project")
+	projectRecord, err := repo.CreateProject(context.Background(), "Completed Project", `C:\src\completed-project`, "first line\nsecond line")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}

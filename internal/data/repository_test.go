@@ -15,7 +15,7 @@ func TestUpdateProjectConfigurationPersistsValues(t *testing.T) {
 		_ = repo.Close()
 	})
 
-	project, err := repo.CreateProject(context.Background(), "Project One")
+	project, err := repo.CreateProject(context.Background(), "Project One", `C:\src\project-one`, "first line\nsecond line")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
