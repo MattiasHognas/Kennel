@@ -21,7 +21,7 @@ func TestExecutionFlowSupervisor(t *testing.T) {
 	super := supervisor.NewSupervisor(&mockRepo{}, eb, "testdata/agents", 1, "test")
 
 	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, topic string) (supervisor.ACPClient, error) {
-		return &acp.FakeClient{Response: "Test planned output - " + topic}, nil
+		return &acp.FakeClient{Response: `{"steps": [{"agent": "frontend-developer", "task": "hello"}]}`}, nil
 	}
 
 	ctx := context.Background()

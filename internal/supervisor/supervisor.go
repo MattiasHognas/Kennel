@@ -2,12 +2,24 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"MattiasHognas/Kennel/internal/acp"
 	"MattiasHognas/Kennel/internal/discovery"
 	eventbus "MattiasHognas/Kennel/internal/events"
 )
+
+type PlanTask struct {
+	Agent string `json:"agent"`
+	Task  string `json:"task"`
+}
+
+type Plan struct {
+	Steps []PlanTask `json:"steps"`
+}
 
 type Repository interface {
 	CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error
@@ -70,27 +82,53 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 	}
 	defer plannerWrapper.Close()
 
-	planPrompt := fmt.Sprintf("Create an execution plan based on these instructions: %s", instructions)
+	planPrompt := fmt.Sprintf(`Create an execution plan based on these instructions: %s
+
+You must output a JSON object containing an array of 'steps'. Each step must have an 'agent' and a 'task' string.
+Available or configured agents: %v
+Ensure the response is purely the JSON or embedded in a Markdown block.`, instructions, configuredAgents)
+
 	planOutput, err := plannerWrapper.Prompt(ctx, planPrompt)
 	if err != nil {
 		return s.failStop(ctx, 0, "planning_failed", err)
 	}
 
-	runSequence := append([]string{"branch-setup"}, configuredAgents...)
-	currentPrompt := planOutput
+	rawJSON := planOutput
+	jsonBlockRegex := regexp.MustCompile("(?s)```(?:json)?\n(.*?)\n```")
+	if matches := jsonBlockRegex.FindStringSubmatch(rawJSON); len(matches) > 1 {
+		rawJSON = matches[1]
+	} else {
+		start := strings.Index(rawJSON, "{")
+		end := strings.LastIndex(rawJSON, "}")
+		if start != -1 && end != -1 && end > start {
+			rawJSON = rawJSON[start : end+1]
+		}
+	}
 
-	for i, stepName := range runSequence {
-		def, ok := agentMap[stepName]
+	var plan Plan
+	if err := json.Unmarshal([]byte(rawJSON), &plan); err != nil {
+		return s.failStop(ctx, 0, "planning_json_parse_failed", err)
+	}
+
+	runSequence := []PlanTask{
+		{Agent: "branch-setup", Task: "Initialize branch context based on plan."},
+	}
+	runSequence = append(runSequence, plan.Steps...)
+	currentPrompt := ""
+
+	for i, step := range runSequence {
+		def, ok := agentMap[step.Agent]
 		if !ok {
-			return s.failStop(ctx, i+1, "agent_not_found", fmt.Errorf("agent %s not found", stepName))
+			return s.failStop(ctx, i+1, "agent_not_found", fmt.Errorf("agent %s not found", step.Agent))
 		}
 
-		wrapper, err := s.AcpFactory(ctx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, stepName)
+		wrapper, err := s.AcpFactory(ctx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, step.Agent)
 		if err != nil {
 			return s.failStop(ctx, i+1, "launch_failed", err)
 		}
 
-		out, err := wrapper.Prompt(ctx, currentPrompt)
+		promptContext := fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", step.Task, currentPrompt)
+		out, err := wrapper.Prompt(ctx, promptContext)
 		if err != nil {
 			wrapper.Close()
 			return s.failStop(ctx, i+1, "execution_failed", err)

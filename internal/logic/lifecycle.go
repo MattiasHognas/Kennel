@@ -1,8 +1,11 @@
 package model
 
 import (
-	agent "MattiasHognas/Kennel/internal/workers"
 	"context"
+
+	eventbus "MattiasHognas/Kennel/internal/events"
+	"MattiasHognas/Kennel/internal/supervisor"
+	agent "MattiasHognas/Kennel/internal/workers"
 )
 
 func (m *Model) startSelectedProject() {
@@ -11,16 +14,23 @@ func (m *Model) startSelectedProject() {
 	if project == nil || project.State.State == agent.Running || project.State.State == agent.Completed {
 		return
 	}
-	if len(project.Runtime.Agents) == 0 {
-		project.State.State = agent.Running
-		m.persistProjectState(project)
-		m.refreshProjectAndSelection(projectIndex)
-		return
+
+	ctx, cancel := context.WithCancel(context.Background())
+	project.Runtime.CancelCtx = cancel
+
+	eb := eventbus.NewEventBus()
+	sup := supervisor.NewSupervisor(m.repository, eb, "./agents", project.Config.ProjectID, project.Config.Name)
+	project.Runtime.Supervisor = sup
+
+	var configuredAgents []string
+	for _, agentInstance := range project.Runtime.Agents {
+		configuredAgents = append(configuredAgents, agentInstance.Name())
 	}
 
-	for _, agentInstance := range project.Runtime.Agents {
-		agentInstance.Run(context.Background())
-	}
+	go func() {
+		_ = sup.RunPlan(ctx, project.Config.Instructions, configuredAgents)
+	}()
+
 	project.State.State = agent.Running
 	m.persistProjectState(project)
 	m.persistProjectAgentStates(project)
@@ -33,16 +43,20 @@ func (m *Model) stopSelectedProject() {
 	if project == nil || project.State.State == agent.Stopped || project.State.State == agent.Completed {
 		return
 	}
-	if len(project.Runtime.Agents) == 0 {
-		project.State.State = agent.Stopped
-		m.persistProjectState(project)
-		m.refreshProjectAndSelection(projectIndex)
-		return
+
+	if project.Runtime.CancelCtx != nil {
+		project.Runtime.CancelCtx()
+		project.Runtime.CancelCtx = nil
+	}
+	if project.Runtime.Supervisor != nil {
+		project.Runtime.Supervisor = nil
 	}
 
+	// Currently keep old logic to stop individual agents if they have their own routines running outside the supervisor for now.
 	for _, agentInstance := range project.Runtime.Agents {
 		agentInstance.Stop()
 	}
+
 	project.State.State = agent.Stopped
 	m.persistProjectState(project)
 	m.persistProjectAgentStates(project)
@@ -54,6 +68,14 @@ func (m *Model) completeSelectedProject() {
 	project := m.selectedProject()
 	if project == nil || project.State.State == agent.Completed {
 		return
+	}
+
+	if project.Runtime.CancelCtx != nil {
+		project.Runtime.CancelCtx()
+		project.Runtime.CancelCtx = nil
+	}
+	if project.Runtime.Supervisor != nil {
+		project.Runtime.Supervisor = nil
 	}
 
 	for _, agentInstance := range project.Runtime.Agents {

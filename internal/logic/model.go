@@ -10,6 +10,7 @@ import (
 
 	repository "MattiasHognas/Kennel/internal/data"
 	eventbus "MattiasHognas/Kennel/internal/events"
+	"MattiasHognas/Kennel/internal/supervisor"
 	"MattiasHognas/Kennel/internal/ui"
 	"MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
@@ -39,6 +40,8 @@ type ProjectRuntime struct {
 	Agents     []agent.AgentContract
 	AgentIDs   []int64
 	Activities []ActivityEntry
+	Supervisor *supervisor.Supervisor
+	CancelCtx  context.CancelFunc
 }
 
 type Project struct {
