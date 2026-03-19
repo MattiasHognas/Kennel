@@ -1,0 +1,5 @@
+package model
+
+import (
+agent "MattiasHognas/Kennel/internal/workers"
+)

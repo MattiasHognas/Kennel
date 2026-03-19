@@ -1,0 +1,9 @@
+package model
+
+import (
+"fmt"
+"time"
+
+"MattiasHognas/Kennel/internal/events"
+tea "charm.land/bubbletea/v2"
+)

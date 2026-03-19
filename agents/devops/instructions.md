@@ -1,0 +1,1 @@
+Create or update build scripts, CI pipelines, Dockerfiles, deployment configs, and environment setup. Ensure the project can be built and deployed reproducibly.

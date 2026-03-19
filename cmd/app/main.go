@@ -6,11 +6,10 @@ import (
 
 	repository "MattiasHognas/Kennel/internal/data"
 	model "MattiasHognas/Kennel/internal/logic"
-	table "MattiasHognas/Kennel/internal/ui/table"
+	"MattiasHognas/Kennel/internal/ui"
 	agent "MattiasHognas/Kennel/internal/workers"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 )
 
 func main() {
@@ -31,7 +30,7 @@ func main() {
 }
 
 func initialModel() (model.Model, func()) {
-	focusedStyles, blurredStyles := newTableStyles()
+	focusedStyles, blurredStyles := ui.NewTableStyles()
 	repository, err := repository.NewSQLiteRepository("data/kennel.db")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to initialize repository: %v", err))
@@ -47,25 +46,6 @@ func initialModel() (model.Model, func()) {
 	}
 
 	return m, cleanup
-}
-
-func newTableStyles() (table.Styles, table.Styles) {
-	focusedStyle := lipgloss.Color("210")
-	headerStyle := lipgloss.Color("210")
-	base := lipgloss.NewStyle().Padding(0, 1)
-	header := lipgloss.NewStyle().Bold(true).Foreground(headerStyle).Padding(0, 1).Border(lipgloss.NormalBorder()).BorderBottom(true).BorderLeft(false).BorderRight(false).BorderTop(false)
-	focusedSelected := lipgloss.NewStyle().Bold(true).Background(focusedStyle)
-	blurredSelected := lipgloss.NewStyle()
-
-	return table.Styles{
-			Header:   header,
-			Cell:     base,
-			Selected: focusedSelected,
-		}, table.Styles{
-			Header:   header,
-			Cell:     base,
-			Selected: blurredSelected,
-		}
 }
 
 func sampleProjects() []model.Project {
