@@ -1,0 +1,1 @@
+Implement frontend features: components, styling, layouts, client-side logic, accessibility. Follow project conventions and existing patterns.

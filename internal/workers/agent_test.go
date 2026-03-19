@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -14,29 +16,48 @@ func TestStopPublishesOnlyAfterRun(t *testing.T) {
 	a.Stop()
 	assertNoActivity(t, activityCh)
 
-	a.Run()
-	assertActivity(t, activityCh, "started")
+	a.Run(context.Background())
+	assertActivityType(t, activityCh, eventbus.WorkerMessageEvent{})
 
 	a.Stop()
-	assertActivity(t, activityCh, "stopped")
+	assertActivityType(t, activityCh, eventbus.WorkerCancellationEvent{})
 }
 
-func assertActivity(t *testing.T, ch <-chan eventbus.Event, want string) {
+func TestCompletePublishesOnlyAfterActivation(t *testing.T) {
+	a := NewAgent("Tester")
+	activityCh := a.SubscribeActivity()
+
+	a.Complete()
+	assertNoActivity(t, activityCh)
+
+	a.Run(context.Background())
+	assertActivityType(t, activityCh, eventbus.WorkerMessageEvent{})
+
+	a.Complete()
+	assertActivityType(t, activityCh, eventbus.WorkerCompletionEvent{})
+
+	if got := a.State(); got != Completed {
+		t.Fatalf("state = %s, want %s", got, Completed)
+	}
+}
+
+func assertActivityType(t *testing.T, ch <-chan eventbus.Event, wantType interface{}) {
 	t.Helper()
 
 	select {
 	case event := <-ch:
-		if got := event.Payload; got != want {
-			t.Fatalf("activity payload = %v, want %q", got, want)
+		t1 := fmt.Sprintf("%T", event.Payload)
+		t2 := fmt.Sprintf("%T", wantType)
+		if t1 != t2 {
+			t.Fatalf("activity payload type = %T, want %T", event.Payload, wantType)
 		}
 	case <-time.After(200 * time.Millisecond):
-		t.Fatalf("timed out waiting for activity %q", want)
+		t.Fatalf("timed out waiting for activity")
 	}
 }
 
 func assertNoActivity(t *testing.T, ch <-chan eventbus.Event) {
 	t.Helper()
-
 	select {
 	case event := <-ch:
 		t.Fatalf("unexpected activity: %v", event.Payload)

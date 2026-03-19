@@ -1,0 +1,1 @@
+Break down the project instructions into small, concrete, independently-completable tasks. Output a numbered task list with clear acceptance criteria. Does not write code — only produces the plan consumed by subsequent workers.

@@ -1,16 +1,16 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
 	repository "MattiasHognas/Kennel/internal/data"
 	model "MattiasHognas/Kennel/internal/logic"
-	table "MattiasHognas/Kennel/internal/ui/table"
+	"MattiasHognas/Kennel/internal/ui"
 	agent "MattiasHognas/Kennel/internal/workers"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 )
 
 func main() {
@@ -31,7 +31,7 @@ func main() {
 }
 
 func initialModel() (model.Model, func()) {
-	focusedStyles, blurredStyles := newTableStyles()
+	focusedStyles, blurredStyles := ui.NewTableStyles()
 	repository, err := repository.NewSQLiteRepository("data/kennel.db")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to initialize repository: %v", err))
@@ -49,81 +49,35 @@ func initialModel() (model.Model, func()) {
 	return m, cleanup
 }
 
-func newTableStyles() (table.Styles, table.Styles) {
-	focusedStyle := lipgloss.Color("210")
-	headerStyle := lipgloss.Color("210")
-	base := lipgloss.NewStyle().Padding(0, 1)
-	header := lipgloss.NewStyle().Bold(true).Foreground(headerStyle).Padding(0, 1).Border(lipgloss.NormalBorder()).BorderBottom(true).BorderLeft(false).BorderRight(false).BorderTop(false)
-	focusedSelected := lipgloss.NewStyle().Bold(true).Background(focusedStyle)
-	blurredSelected := lipgloss.NewStyle()
-
-	return table.Styles{
-			Header:   header,
-			Cell:     base,
-			Selected: focusedSelected,
-		}, table.Styles{
-			Header:   header,
-			Cell:     base,
-			Selected: blurredSelected,
-		}
-}
-
 func sampleProjects() []model.Project {
-	projectDefinitions := []struct {
-		name       string
-		agents     []string
-		activities []model.ActivityEntry
-	}{
-		{
-			name:   "Barky barky",
-			agents: []string{"Planner", "UX", "Frontend Developer", "QA", "DevOps"},
-			activities: []model.ActivityEntry{
-				{Timestamp: "08:00:00", Text: "Project created"},
-				{Timestamp: "08:05:00", Text: "Planner: defined initial scope"},
-				{Timestamp: "08:10:00", Text: "UX: sketched primary workflow"},
-			},
-		},
-		{
-			name:   "Sniff sniff",
-			agents: []string{"Planner", "Backend Developer", "QA"},
-			activities: []model.ActivityEntry{
-				{Timestamp: "09:00:00", Text: "Project created"},
-				{Timestamp: "09:15:00", Text: "Planner: prepared backlog"},
-				{Timestamp: "09:30:00", Text: "Backend Developer: designed API contract"},
-			},
-		},
-		{
-			name:   "Grr Grr",
-			agents: []string{"Planning", "Backend Developer 1", "Backend Developer 2", "QA", "DevOps"},
-			activities: []model.ActivityEntry{
-				{Timestamp: "10:00:00", Text: "Project created"},
-				{Timestamp: "10:10:00", Text: "Planning: split delivery phases"},
-				{Timestamp: "10:30:00", Text: "DevOps: prepared deployment pipeline"},
-			},
-		},
-	}
 
-	projects := make([]model.Project, 0, len(projectDefinitions))
-	for _, definition := range projectDefinitions {
-		agents := make([]agent.AgentContract, 0, len(definition.agents))
-		for _, name := range definition.agents {
-			agents = append(agents, agent.NewAgent(name))
-		}
+	var seedConfig = model.ProjectConfig{Name: "Testing", Workplace: "C:\\source\\kennel\\test_project", Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes"}
 
-		projects = append(projects, model.Project{
-			Name:       definition.name,
-			State:      agent.Stopped,
+	projects := make([]model.Project, 0)
+	agents := make([]agent.AgentContract, 0)
+
+	projects = append(projects, model.Project{
+		Config: model.ProjectConfig{
+			Name:         seedConfig.Name,
+			Workplace:    seedConfig.Workplace,
+			Instructions: seedConfig.Instructions,
+		},
+		State: model.ProjectState{
+			State: agent.Stopped,
+		},
+		Runtime: model.ProjectRuntime{
 			Agents:     agents,
-			Activities: append([]model.ActivityEntry(nil), definition.activities...),
-		})
-	}
+			AgentIDs:   nil,
+			Activities: []model.ActivityEntry{},
+		},
+	})
 
 	return projects
 }
 
 func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
-	storedProjects, err := repository.ReadProjects()
+	storedProjects, err := repository.ReadProjects(context.Background())
 	if err != nil {
 		_ = repository.Close()
 		panic(fmt.Sprintf("Failed to read projects, falling back to samples: %v\n", err))
@@ -135,7 +89,7 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 			panic(fmt.Sprintf("Failed to seed sample projects, falling back to samples: %v\n", err))
 		}
 
-		storedProjects, err = repository.ReadProjects()
+		storedProjects, err = repository.ReadProjects(context.Background())
 		if err != nil || len(storedProjects) == 0 {
 			_ = repository.Close()
 			if err != nil {
@@ -164,11 +118,20 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 		}
 
 		projects = append(projects, model.Project{
-			ProjectID:  storedProject.ID,
-			Name:       storedProject.Name,
-			Agents:     agents,
-			AgentIDs:   agentIDs,
-			Activities: activities,
+			Config: model.ProjectConfig{
+				ProjectID:    storedProject.ID,
+				Name:         storedProject.Name,
+				Workplace:    storedProject.Workplace,
+				Instructions: storedProject.Instructions,
+			},
+			State: model.ProjectState{
+				State: restoreState(storedProject.State),
+			},
+			Runtime: model.ProjectRuntime{
+				Agents:     agents,
+				AgentIDs:   agentIDs,
+				Activities: activities,
+			},
 		})
 	}
 
@@ -177,19 +140,19 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
 func seedSampleProjects(repository *repository.SQLiteRepository) error {
 	for _, definition := range sampleProjects() {
-		project, err := repository.CreateProject(definition.Name)
+		project, err := repository.CreateProject(context.Background(), definition.Config.Name, definition.Config.Workplace, definition.Config.Instructions)
 		if err != nil {
 			return err
 		}
 
-		for _, agentInstance := range definition.Agents {
-			if _, err := repository.AddAgentToProject(project.ID, agentInstance.Name()); err != nil {
+		for _, agentInstance := range definition.Runtime.Agents {
+			if _, err := repository.AddAgentToProject(context.Background(), project.ID, agentInstance.Name()); err != nil {
 				return err
 			}
 		}
 
-		for _, activity := range definition.Activities {
-			if _, err := repository.NewActivity(project.ID, sql.NullInt64{}, activity.Text); err != nil {
+		for _, activity := range definition.Runtime.Activities {
+			if _, err := repository.NewActivity(context.Background(), project.ID, sql.NullInt64{}, activity.Text); err != nil {
 				return err
 			}
 		}
@@ -200,8 +163,22 @@ func seedSampleProjects(repository *repository.SQLiteRepository) error {
 
 func restoreAgentState(name string, persistedState string) agent.AgentContract {
 	a := agent.NewAgent(name)
-	if persistedState == agent.Running.String() {
-		a.Run()
+	switch persistedState {
+	case agent.Running.String():
+		a.Run(context.Background())
+	case agent.Completed.String():
+		a.Complete()
 	}
 	return a
+}
+
+func restoreState(persistedState string) agent.AgentState {
+	switch persistedState {
+	case agent.Running.String():
+		return agent.Running
+	case agent.Completed.String():
+		return agent.Completed
+	default:
+		return agent.Stopped
+	}
 }
