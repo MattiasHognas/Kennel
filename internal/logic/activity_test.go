@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"testing"
 
 	"MattiasHognas/Kennel/internal/ui/table"
@@ -10,35 +11,39 @@ import (
 func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 	repo := newTestRepository(t)
 
-	storedProject, err := repo.CreateProject("Test Project")
+	storedProject, err := repo.CreateProject(context.Background(), "Test Project")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
 
-	runningAgentRecord, err := repo.AddAgentToProject(storedProject.ID, "Runner")
+	runningAgentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "Runner")
 	if err != nil {
 		t.Fatalf("create running agent: %v", err)
 	}
 
-	stoppedAgentRecord, err := repo.AddAgentToProject(storedProject.ID, "Idle")
+	stoppedAgentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "Idle")
 	if err != nil {
 		t.Fatalf("create stopped agent: %v", err)
 	}
 
 	runningAgent := agent.NewAgent("Runner")
-	runningAgent.Run()
+	runningAgent.Run(context.Background())
 	stoppedAgent := agent.NewAgent("Idle")
 
 	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
-		ProjectID: storedProject.ID,
-		Name:      storedProject.Name,
-		Agents:    []agent.AgentContract{runningAgent, stoppedAgent},
-		AgentIDs:  []int64{runningAgentRecord.ID, stoppedAgentRecord.ID},
+		Config: ProjectConfig{
+			ProjectID: storedProject.ID,
+			Name:      storedProject.Name,
+		},
+		Runtime: ProjectRuntime{
+			Agents:   []agent.AgentContract{runningAgent, stoppedAgent},
+			AgentIDs: []int64{runningAgentRecord.ID, stoppedAgentRecord.ID},
+		},
 	}}, repo)
 
 	m.Shutdown()
 
-	project, err := repo.ReadProject(storedProject.ID)
+	project, err := repo.ReadProject(context.Background(), storedProject.ID)
 	if err != nil {
 		t.Fatalf("read project after shutdown: %v", err)
 	}
@@ -55,10 +60,10 @@ func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 	if project.Activities[0].Text != "Runner: stopped" {
 		t.Fatalf("stored activity = %q, want %q", project.Activities[0].Text, "Runner: stopped")
 	}
-	if len(m.projects[0].Activities) != 1 || m.projects[0].Activities[0].Text != "Runner: stopped" {
-		t.Fatalf("model activities = %#v, want one stored stop activity", m.projects[0].Activities)
+	if len(m.projects[0].Runtime.Activities) != 1 || m.projects[0].Runtime.Activities[0].Text != "Runner: stopped" {
+		t.Fatalf("model activities = %#v, want one stored stop activity", m.projects[0].Runtime.Activities)
 	}
-	if m.projects[0].State != agent.Stopped {
-		t.Fatalf("model project state = %s, want %s", m.projects[0].State, agent.Stopped)
+	if m.projects[0].State.State != agent.Stopped {
+		t.Fatalf("model project state = %s, want %s", m.projects[0].State.State, agent.Stopped)
 	}
 }

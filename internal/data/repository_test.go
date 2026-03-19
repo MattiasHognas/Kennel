@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -14,16 +15,16 @@ func TestUpdateProjectConfigurationPersistsValues(t *testing.T) {
 		_ = repo.Close()
 	})
 
-	project, err := repo.CreateProject("Project One")
+	project, err := repo.CreateProject(context.Background(), "Project One")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
 
-	if err := repo.UpdateProjectConfiguration(project.ID, "Project One Updated", `C:\src\project-one`, "first line\nsecond line"); err != nil {
+	if err := repo.UpdateProjectConfiguration(context.Background(), project.ID, "Project One Updated", `C:\src\project-one`, "first line\nsecond line"); err != nil {
 		t.Fatalf("update project configuration: %v", err)
 	}
 
-	storedProject, err := repo.ReadProject(project.ID)
+	storedProject, err := repo.ReadProject(context.Background(), project.ID)
 	if err != nil {
 		t.Fatalf("read project: %v", err)
 	}

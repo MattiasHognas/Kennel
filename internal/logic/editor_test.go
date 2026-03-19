@@ -1,6 +1,8 @@
 package model
 
 import (
+	agent "MattiasHognas/Kennel/internal/workers"
+	"context"
 	"testing"
 
 	"MattiasHognas/Kennel/internal/ui/table"
@@ -11,14 +13,13 @@ import (
 func TestEnterOpensProjectEditorAndClickingOKPersistsWorkplace(t *testing.T) {
 	repo := newTestRepository(t)
 
-	storedProject, err := repo.CreateProject("Configured Project")
+	storedProject, err := repo.CreateProject(context.Background(), "Configured Project")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
 
 	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
-		ProjectID: storedProject.ID,
-		Name:      storedProject.Name,
+		Config: ProjectConfig{ProjectID: storedProject.ID, Name: storedProject.Name}, State: ProjectState{State: agent.Stopped}, Runtime: ProjectRuntime{},
 	}}, repo)
 	m.SetFocus(0)
 	m.projectTable.SetCursor(1)
@@ -50,17 +51,17 @@ func TestEnterOpensProjectEditorAndClickingOKPersistsWorkplace(t *testing.T) {
 	if updatedModel.mode != tableViewMode {
 		t.Fatalf("mode after save = %v, want tableViewMode", updatedModel.mode)
 	}
-	if updatedModel.projects[0].Name != "Configured Project Updated" {
-		t.Fatalf("model name = %q, want %q", updatedModel.projects[0].Name, "Configured Project Updated")
+	if updatedModel.projects[0].Config.Name != "Configured Project Updated" {
+		t.Fatalf("model name = %q, want %q", updatedModel.projects[0].Config.Name, "Configured Project Updated")
 	}
-	if updatedModel.projects[0].Workplace != `C:\work\kennel` {
-		t.Fatalf("model workplace = %q, want %q", updatedModel.projects[0].Workplace, `C:\work\kennel`)
+	if updatedModel.projects[0].Config.Workplace != `C:\work\kennel` {
+		t.Fatalf("model workplace = %q, want %q", updatedModel.projects[0].Config.Workplace, `C:\work\kennel`)
 	}
-	if updatedModel.projects[0].Instructions != "step one\nstep two" {
-		t.Fatalf("model instructions = %q, want %q", updatedModel.projects[0].Instructions, "step one\nstep two")
+	if updatedModel.projects[0].Config.Instructions != "step one\nstep two" {
+		t.Fatalf("model instructions = %q, want %q", updatedModel.projects[0].Config.Instructions, "step one\nstep two")
 	}
 
-	persistedProject, err := repo.ReadProject(storedProject.ID)
+	persistedProject, err := repo.ReadProject(context.Background(), storedProject.ID)
 	if err != nil {
 		t.Fatalf("read project after save: %v", err)
 	}
@@ -112,14 +113,14 @@ func TestCreateNewRowOpensEditorAndCreatesProject(t *testing.T) {
 	if len(updatedModel.projects) != 1 {
 		t.Fatalf("project count = %d, want 1", len(updatedModel.projects))
 	}
-	if updatedModel.projects[0].Name != "New Project" {
-		t.Fatalf("model name = %q, want %q", updatedModel.projects[0].Name, "New Project")
+	if updatedModel.projects[0].Config.Name != "New Project" {
+		t.Fatalf("model name = %q, want %q", updatedModel.projects[0].Config.Name, "New Project")
 	}
 	if updatedModel.projectTable.Cursor() != 1 {
 		t.Fatalf("project cursor = %d, want 1", updatedModel.projectTable.Cursor())
 	}
 
-	projects, err := repo.ReadProjects()
+	projects, err := repo.ReadProjects(context.Background())
 	if err != nil {
 		t.Fatalf("read projects: %v", err)
 	}

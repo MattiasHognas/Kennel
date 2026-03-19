@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -91,12 +92,19 @@ func sampleProjects() []model.Project {
 		}
 
 		projects = append(projects, model.Project{
-			Name:         definition.name,
-			Workplace:    "",
-			Instructions: "",
-			State:        agent.Stopped,
-			Agents:       agents,
-			Activities:   append([]model.ActivityEntry(nil), definition.activities...),
+			Config: model.ProjectConfig{
+				Name:         definition.name,
+				Workplace:    "",
+				Instructions: "",
+			},
+			State: model.ProjectState{
+				State: agent.Stopped,
+			},
+			Runtime: model.ProjectRuntime{
+				Agents:     agents,
+				AgentIDs:   nil,
+				Activities: append([]model.ActivityEntry(nil), definition.activities...),
+			},
 		})
 	}
 
@@ -105,7 +113,7 @@ func sampleProjects() []model.Project {
 
 func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
-	storedProjects, err := repository.ReadProjects()
+	storedProjects, err := repository.ReadProjects(context.Background())
 	if err != nil {
 		_ = repository.Close()
 		panic(fmt.Sprintf("Failed to read projects, falling back to samples: %v\n", err))
@@ -117,7 +125,7 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 			panic(fmt.Sprintf("Failed to seed sample projects, falling back to samples: %v\n", err))
 		}
 
-		storedProjects, err = repository.ReadProjects()
+		storedProjects, err = repository.ReadProjects(context.Background())
 		if err != nil || len(storedProjects) == 0 {
 			_ = repository.Close()
 			if err != nil {
@@ -146,14 +154,20 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 		}
 
 		projects = append(projects, model.Project{
-			ProjectID:    storedProject.ID,
-			Name:         storedProject.Name,
-			Workplace:    storedProject.Workplace,
-			Instructions: storedProject.Instructions,
-			State:        restoreState(storedProject.State),
-			Agents:       agents,
-			AgentIDs:     agentIDs,
-			Activities:   activities,
+			Config: model.ProjectConfig{
+				ProjectID:    storedProject.ID,
+				Name:         storedProject.Name,
+				Workplace:    storedProject.Workplace,
+				Instructions: storedProject.Instructions,
+			},
+			State: model.ProjectState{
+				State: restoreState(storedProject.State),
+			},
+			Runtime: model.ProjectRuntime{
+				Agents:     agents,
+				AgentIDs:   agentIDs,
+				Activities: activities,
+			},
 		})
 	}
 
@@ -162,19 +176,19 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
 func seedSampleProjects(repository *repository.SQLiteRepository) error {
 	for _, definition := range sampleProjects() {
-		project, err := repository.CreateProject(definition.Name)
+		project, err := repository.CreateProject(context.Background(), definition.Config.Name)
 		if err != nil {
 			return err
 		}
 
-		for _, agentInstance := range definition.Agents {
-			if _, err := repository.AddAgentToProject(project.ID, agentInstance.Name()); err != nil {
+		for _, agentInstance := range definition.Runtime.Agents {
+			if _, err := repository.AddAgentToProject(context.Background(), project.ID, agentInstance.Name()); err != nil {
 				return err
 			}
 		}
 
-		for _, activity := range definition.Activities {
-			if _, err := repository.NewActivity(project.ID, sql.NullInt64{}, activity.Text); err != nil {
+		for _, activity := range definition.Runtime.Activities {
+			if _, err := repository.NewActivity(context.Background(), project.ID, sql.NullInt64{}, activity.Text); err != nil {
 				return err
 			}
 		}
@@ -187,7 +201,7 @@ func restoreAgentState(name string, persistedState string) agent.AgentContract {
 	a := agent.NewAgent(name)
 	switch persistedState {
 	case agent.Running.String():
-		a.Run()
+		a.Run(context.Background())
 	case agent.Completed.String():
 		a.Complete()
 	}

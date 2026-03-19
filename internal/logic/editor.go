@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -24,7 +25,7 @@ type projectEditor struct {
 
 func newProjectEditor() projectEditor {
 	nameInput := textinput.New()
-	nameInput.Placeholder = "Project name"
+	nameInput.Placeholder = "project.Config.Name"
 	nameInput.CharLimit = 160
 	nameInput.SetWidth(DefaultActivityWidth)
 
@@ -34,7 +35,7 @@ func newProjectEditor() projectEditor {
 	workplaceInput.SetWidth(DefaultActivityWidth)
 
 	instructionsInput := textarea.New()
-	instructionsInput.Placeholder = "Add project instructions"
+	instructionsInput.Placeholder = "Add project.Config.Instructions"
 	instructionsInput.CharLimit = 4000
 	instructionsInput.SetWidth(DefaultActivityWidth)
 	instructionsInput.SetHeight(6)
@@ -66,11 +67,11 @@ func (m *Model) openSelectedProjectEditor() tea.Cmd {
 		return nil
 	}
 
-	m.projectEditor.workplaceInput.SetValue(project.Workplace)
+	m.projectEditor.workplaceInput.SetValue(project.Config.Workplace)
 	m.projectEditor.workplaceInput.CursorEnd()
-	m.projectEditor.nameInput.SetValue(project.Name)
+	m.projectEditor.nameInput.SetValue(project.Config.Name)
 	m.projectEditor.nameInput.CursorEnd()
-	m.projectEditor.instructionsInput.SetValue(project.Instructions)
+	m.projectEditor.instructionsInput.SetValue(project.Config.Instructions)
 	m.projectEditor.instructionsInput.CursorEnd()
 	return m.setProjectEditorFocus(0)
 }
@@ -110,7 +111,7 @@ func (m *Model) setProjectEditorFocus(index int) tea.Cmd {
 func (m Model) projectEditorView() string {
 	title := "Create project"
 	if m.projectEditor.projectIndex >= 0 && m.projectEditor.projectIndex < len(m.projects) {
-		title = fmt.Sprintf("Edit project: %s", m.projects[m.projectEditor.projectIndex].Name)
+		title = fmt.Sprintf("Edit project: %s", m.projects[m.projectEditor.projectIndex].Config.Name)
 	}
 
 	lines := []string{
@@ -209,29 +210,35 @@ func (m *Model) saveSelectedProjectEditor() tea.Cmd {
 	workplace := strings.TrimSpace(m.projectEditor.workplaceInput.Value())
 	instructions := strings.TrimSpace(m.projectEditor.instructionsInput.Value())
 	if name == "" {
-		m.projectEditor.errorMessage = "Save failed: project name cannot be empty"
+		m.projectEditor.errorMessage = "Save failed: project.Config.Name cannot be empty"
 		return nil
 	}
 
 	if m.projectEditor.projectIndex < 0 {
 		newProject := Project{
-			Name:         name,
-			Workplace:    workplace,
-			Instructions: instructions,
-			State:        agent.Stopped,
-			Agents:       nil,
-			AgentIDs:     nil,
-			Activities:   nil,
+			Config: ProjectConfig{
+				Name:         name,
+				Workplace:    workplace,
+				Instructions: instructions,
+			},
+			State: ProjectState{
+				State: agent.Stopped,
+			},
+			Runtime: ProjectRuntime{
+				Agents:     nil,
+				AgentIDs:   nil,
+				Activities: nil,
+			},
 		}
 
 		if m.repository != nil {
-			persistedProject, err := m.repository.CreateProjectConfiguration(name, workplace, instructions)
+			persistedProject, err := m.repository.CreateProjectConfiguration(context.Background(), name, workplace, instructions)
 			if err != nil {
 				m.projectEditor.errorMessage = fmt.Sprintf("Save failed: %v", err)
 				return nil
 			}
-			newProject.ProjectID = persistedProject.ID
-			newProject.State = parseAgentState(persistedProject.State)
+			newProject.Config.ProjectID = persistedProject.ID
+			newProject.State.State = parseAgentState(persistedProject.State)
 		}
 
 		m.projects = append(m.projects, newProject)
@@ -248,16 +255,16 @@ func (m *Model) saveSelectedProjectEditor() tea.Cmd {
 		return nil
 	}
 
-	if m.repository != nil && project.ProjectID > 0 {
-		if err := m.repository.UpdateProjectConfiguration(project.ProjectID, name, workplace, instructions); err != nil {
+	if m.repository != nil && project.Config.ProjectID > 0 {
+		if err := m.repository.UpdateProjectConfiguration(context.Background(), project.Config.ProjectID, name, workplace, instructions); err != nil {
 			m.projectEditor.errorMessage = fmt.Sprintf("Save failed: %v", err)
 			return nil
 		}
 	}
 
-	project.Name = name
-	project.Workplace = workplace
-	project.Instructions = instructions
+	project.Config.Name = name
+	project.Config.Workplace = workplace
+	project.Config.Instructions = instructions
 	m.refreshProjectTable()
 	m.closeSelectedProjectEditor()
 	return nil

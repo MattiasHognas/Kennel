@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -23,15 +24,27 @@ type ActivityEntry struct {
 	Text      string
 }
 
-type Project struct {
+type ProjectConfig struct {
 	ProjectID    int64
 	Name         string
 	Workplace    string
 	Instructions string
-	State        agent.AgentState
-	Agents       []agent.AgentContract
-	AgentIDs     []int64
-	Activities   []ActivityEntry
+}
+
+type ProjectState struct {
+	State agent.AgentState
+}
+
+type ProjectRuntime struct {
+	Agents     []agent.AgentContract
+	AgentIDs   []int64
+	Activities []ActivityEntry
+}
+
+type Project struct {
+	Config  ProjectConfig
+	State   ProjectState
+	Runtime ProjectRuntime
 }
 
 type viewMode int
@@ -227,8 +240,8 @@ func (m Model) updateTables(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.selectedProjectIndex() != previousProject {
 		m.refreshSelectedProjectTables()
-		if project := m.selectedProject(); project != nil && len(project.Agents) > 0 {
-			m.agentTable.SetCursor(min(previousAgent, len(project.Agents)-1))
+		if project := m.selectedProject(); project != nil && len(project.Runtime.Agents) > 0 {
+			m.agentTable.SetCursor(min(previousAgent, len(project.Runtime.Agents)-1))
 		} else {
 			m.agentTable.SetCursor(0)
 		}
@@ -338,7 +351,7 @@ func (m *Model) refreshProjectTable() {
 	rows := make([]table.Row, 0, len(m.projects)+1)
 	rows = append(rows, table.Row{"new", createProjectRowName})
 	for _, project := range m.projects {
-		rows = append(rows, table.Row{project.State.String(), project.Name})
+		rows = append(rows, table.Row{project.State.State.String(), project.Config.Name})
 	}
 	m.projectTable.SetRows(rows)
 }
@@ -357,8 +370,8 @@ func (m *Model) refreshSelectedProjectTables() {
 		return
 	}
 
-	agentRows := make([]table.Row, 0, len(project.Agents))
-	for _, agentInstance := range project.Agents {
+	agentRows := make([]table.Row, 0, len(project.Runtime.Agents))
+	for _, agentInstance := range project.Runtime.Agents {
 		agentRows = append(agentRows, table.Row{agentInstance.State().String(), agentInstance.Name()})
 	}
 	if len(agentRows) == 0 {
@@ -366,9 +379,9 @@ func (m *Model) refreshSelectedProjectTables() {
 	}
 	m.agentTable.SetRows(agentRows)
 
-	activityRows := make([]table.Row, 0, len(project.Activities))
-	for i := len(project.Activities) - 1; i >= 0; i-- {
-		activityRows = append(activityRows, table.Row{project.Activities[i].Timestamp, project.Activities[i].Text})
+	activityRows := make([]table.Row, 0, len(project.Runtime.Activities))
+	for i := len(project.Runtime.Activities) - 1; i >= 0; i-- {
+		activityRows = append(activityRows, table.Row{project.Runtime.Activities[i].Timestamp, project.Runtime.Activities[i].Text})
 	}
 	if len(activityRows) == 0 {
 		activityRows = append(activityRows, table.Row{"-", "No activity yet"})
@@ -408,7 +421,7 @@ func (m *Model) selectedProjectSummary() string {
 	if project == nil {
 		return "none"
 	}
-	return fmt.Sprintf("%s (%s)", project.Name, project.State)
+	return fmt.Sprintf("%s (%s)", project.Config.Name, project.State)
 }
 
 func (m *Model) selectedProjectWorkplaceSummary() string {
@@ -417,19 +430,19 @@ func (m *Model) selectedProjectWorkplaceSummary() string {
 	}
 
 	project := m.selectedProject()
-	if project == nil || strings.TrimSpace(project.Workplace) == "" {
+	if project == nil || strings.TrimSpace(project.Config.Workplace) == "" {
 		return "not set"
 	}
-	return project.Workplace
+	return project.Config.Workplace
 }
 
 func (m *Model) selectedAgentIndex() int {
 	project := m.selectedProject()
-	if project == nil || len(project.Agents) == 0 {
+	if project == nil || len(project.Runtime.Agents) == 0 {
 		return -1
 	}
 	index := m.agentTable.Cursor()
-	if index < 0 || index >= len(project.Agents) {
+	if index < 0 || index >= len(project.Runtime.Agents) {
 		return -1
 	}
 	return index
@@ -441,7 +454,7 @@ func (m *Model) selectedAgent() agent.AgentContract {
 	if project == nil || index < 0 {
 		return nil
 	}
-	return project.Agents[index]
+	return project.Runtime.Agents[index]
 }
 
 func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bool, cmd tea.Cmd) {
@@ -497,42 +510,42 @@ func parseAgentState(state string) agent.AgentState {
 }
 
 func (m *Model) persistProjectState(project *Project) {
-	if m.repository == nil || project == nil || project.ProjectID <= 0 {
+	if m.repository == nil || project == nil || project.Config.ProjectID <= 0 {
 		return
 	}
 
-	if err := m.repository.UpdateProjectState(project.ProjectID, project.State.String()); err != nil {
+	if err := m.repository.UpdateProjectState(context.Background(), project.Config.ProjectID, project.State.State.String()); err != nil {
 		fmt.Fprintf(os.Stderr, "persist project state: %v\n", err)
 	}
 }
 
 func (m *Model) persistProjectAgentStates(project *Project) {
-	if m.repository == nil || project == nil || len(project.AgentIDs) == 0 {
+	if m.repository == nil || project == nil || len(project.Runtime.AgentIDs) == 0 {
 		return
 	}
 
-	for i, agentID := range project.AgentIDs {
-		if i >= len(project.Agents) || agentID <= 0 {
+	for i, agentID := range project.Runtime.AgentIDs {
+		if i >= len(project.Runtime.Agents) || agentID <= 0 {
 			continue
 		}
 
-		if err := m.repository.UpdateAgentState(agentID, project.Agents[i].State().String()); err != nil {
+		if err := m.repository.UpdateAgentState(context.Background(), agentID, project.Runtime.Agents[i].State().String()); err != nil {
 			fmt.Fprintf(os.Stderr, "persist agent state: %v\n", err)
 		}
 	}
 }
 
 func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
-	if m.repository == nil || project == nil || project.ProjectID <= 0 {
+	if m.repository == nil || project == nil || project.Config.ProjectID <= 0 {
 		return
 	}
 
 	agentID := sql.NullInt64{}
-	if agentIndex >= 0 && agentIndex < len(project.AgentIDs) && project.AgentIDs[agentIndex] > 0 {
-		agentID = sql.NullInt64{Int64: project.AgentIDs[agentIndex], Valid: true}
+	if agentIndex >= 0 && agentIndex < len(project.Runtime.AgentIDs) && project.Runtime.AgentIDs[agentIndex] > 0 {
+		agentID = sql.NullInt64{Int64: project.Runtime.AgentIDs[agentIndex], Valid: true}
 	}
 
-	if _, err := m.repository.NewActivity(project.ProjectID, agentID, text); err != nil {
+	if _, err := m.repository.NewActivity(context.Background(), project.Config.ProjectID, agentID, text); err != nil {
 		fmt.Fprintf(os.Stderr, "persist activity: %v\n", err)
 	}
 }
@@ -540,21 +553,21 @@ func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
 func (m Model) Shutdown() {
 	for i := range m.projects {
 		project := &m.projects[i]
-		for agentIndex, agentInstance := range project.Agents {
+		for agentIndex, agentInstance := range project.Runtime.Agents {
 			if agentInstance.State() != agent.Running {
 				continue
 			}
 
 			agentInstance.Stop()
 			activityText := fmt.Sprintf("%s: stopped", agentInstance.Name())
-			project.Activities = append(project.Activities, ActivityEntry{
+			project.Runtime.Activities = append(project.Runtime.Activities, ActivityEntry{
 				Timestamp: time.Now().Format("15:04:05"),
 				Text:      activityText,
 			})
 			m.persistActivity(project, agentIndex, activityText)
 		}
-		if project.State == agent.Running {
-			project.State = agent.Stopped
+		if project.State.State == agent.Running {
+			project.State.State = agent.Stopped
 		}
 		m.persistProjectState(project)
 		m.persistProjectAgentStates(project)

@@ -2,25 +2,26 @@ package model
 
 import (
 	agent "MattiasHognas/Kennel/internal/workers"
+	"context"
 )
 
 func (m *Model) startSelectedProject() {
 	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
-	if project == nil || project.State == agent.Running || project.State == agent.Completed {
+	if project == nil || project.State.State == agent.Running || project.State.State == agent.Completed {
 		return
 	}
-	if len(project.Agents) == 0 {
-		project.State = agent.Running
+	if len(project.Runtime.Agents) == 0 {
+		project.State.State = agent.Running
 		m.persistProjectState(project)
 		m.refreshProjectAndSelection(projectIndex)
 		return
 	}
 
-	for _, agentInstance := range project.Agents {
-		agentInstance.Run()
+	for _, agentInstance := range project.Runtime.Agents {
+		agentInstance.Run(context.Background())
 	}
-	project.State = agent.Running
+	project.State.State = agent.Running
 	m.persistProjectState(project)
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(projectIndex)
@@ -29,20 +30,20 @@ func (m *Model) startSelectedProject() {
 func (m *Model) stopSelectedProject() {
 	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
-	if project == nil || project.State == agent.Stopped || project.State == agent.Completed {
+	if project == nil || project.State.State == agent.Stopped || project.State.State == agent.Completed {
 		return
 	}
-	if len(project.Agents) == 0 {
-		project.State = agent.Stopped
+	if len(project.Runtime.Agents) == 0 {
+		project.State.State = agent.Stopped
 		m.persistProjectState(project)
 		m.refreshProjectAndSelection(projectIndex)
 		return
 	}
 
-	for _, agentInstance := range project.Agents {
+	for _, agentInstance := range project.Runtime.Agents {
 		agentInstance.Stop()
 	}
-	project.State = agent.Stopped
+	project.State.State = agent.Stopped
 	m.persistProjectState(project)
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(projectIndex)
@@ -51,14 +52,14 @@ func (m *Model) stopSelectedProject() {
 func (m *Model) completeSelectedProject() {
 	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
-	if project == nil || project.State == agent.Completed {
+	if project == nil || project.State.State == agent.Completed {
 		return
 	}
 
-	for _, agentInstance := range project.Agents {
+	for _, agentInstance := range project.Runtime.Agents {
 		agentInstance.Complete()
 	}
-	project.State = agent.Completed
+	project.State.State = agent.Completed
 	m.persistProjectState(project)
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(projectIndex)
@@ -71,7 +72,7 @@ func (m *Model) startSelectedAgent() {
 		return
 	}
 
-	agentInstance.Run()
+	agentInstance.Run(context.Background())
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(m.selectedProjectIndex())
 }
@@ -105,11 +106,11 @@ func (m *Model) cycleSelectedProjectState() {
 	if project == nil {
 		return
 	}
-	if project.State == agent.Completed {
+	if project.State.State == agent.Completed {
 		return
 	}
 
-	switch project.State {
+	switch project.State.State {
 	case agent.Stopped:
 		m.startSelectedProject()
 	default:

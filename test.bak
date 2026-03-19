@@ -1,1 +1,0 @@
-package main; import ("fmt"; tint "github.com/lrstanley/bubbletint"; lipgloss1 "github.com/charmbracelet/lipgloss"; lipgloss2 "charm.land/lipgloss/v2"); func main() { hex := string(tint.TintBirdsOfParadise.Bg().(lipgloss1.Color)); c := lipgloss2.Color(hex); fmt.Printf("%T %v\\\\n", c, c) }

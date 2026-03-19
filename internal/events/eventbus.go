@@ -2,6 +2,17 @@ package eventbus
 
 import "sync"
 
+// Execution event types
+type PlanUpdateEvent struct{ Plan string }
+type WorkerMessageEvent struct{ Chunk string }
+type ToolCallEvent struct {
+	ToolName string
+	Args     string
+}
+type WorkerCompletionEvent struct{ Result string }
+type WorkerCancellationEvent struct{ Reason string }
+type WorkerFailureEvent struct{ Error error }
+
 type Event struct {
 	Payload any
 }

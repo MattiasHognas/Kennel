@@ -1,6 +1,7 @@
 package model
 
 import (
+	eventbus "MattiasHognas/Kennel/internal/events"
 	"fmt"
 	"time"
 
@@ -13,14 +14,29 @@ func waitForActivity(source ActivitySource) tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return activityMsg{source: source, text: fmt.Sprint(event.Payload)}
+		var text string
+		switch p := event.Payload.(type) {
+		case eventbus.WorkerMessageEvent:
+			text = p.Chunk
+		case eventbus.WorkerCancellationEvent:
+			text = p.Reason
+		case eventbus.WorkerCompletionEvent:
+			text = p.Result
+		case eventbus.PlanUpdateEvent:
+			text = "Plan updated"
+		case string:
+			text = p
+		default:
+			text = fmt.Sprintf("%v", event.Payload)
+		}
+		return activityMsg{source: source, text: text}
 	}
 }
 
 func (m *Model) BuildActivitySources() []ActivitySource {
 	sources := make([]ActivitySource, 0)
 	for projectIndex := range m.projects {
-		for agentIndex, agentInstance := range m.projects[projectIndex].Agents {
+		for agentIndex, agentInstance := range m.projects[projectIndex].Runtime.Agents {
 			sources = append(sources, ActivitySource{
 				projectIndex: projectIndex,
 				agentIndex:   agentIndex,
@@ -37,12 +53,12 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 	}
 
 	project := &m.projects[source.projectIndex]
-	if source.agentIndex < 0 || source.agentIndex >= len(project.Agents) {
+	if source.agentIndex < 0 || source.agentIndex >= len(project.Runtime.Agents) {
 		return
 	}
 
-	activityText := fmt.Sprintf("%s: %s", project.Agents[source.agentIndex].Name(), text)
-	project.Activities = append(project.Activities, ActivityEntry{
+	activityText := fmt.Sprintf("%s: %s", project.Runtime.Agents[source.agentIndex].Name(), text)
+	project.Runtime.Activities = append(project.Runtime.Activities, ActivityEntry{
 		Timestamp: time.Now().Format("15:04:05"),
 		Text:      activityText,
 	})

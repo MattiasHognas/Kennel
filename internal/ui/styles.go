@@ -3,10 +3,10 @@ package ui
 import (
 	"image/color"
 
-	lipgloss1 "github.com/charmbracelet/lipgloss"
-	lipgloss "charm.land/lipgloss/v2"
-	tint "github.com/lrstanley/bubbletint"
 	"MattiasHognas/Kennel/internal/ui/table"
+	lipgloss "charm.land/lipgloss/v2"
+	lipgloss1 "github.com/charmbracelet/lipgloss"
+	tint "github.com/lrstanley/bubbletint"
 )
 
 var Theme = tint.TintBirdsOfParadise
