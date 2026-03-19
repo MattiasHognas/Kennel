@@ -10,6 +10,8 @@ import (
 	"MattiasHognas/Kennel/internal/acp"
 	"MattiasHognas/Kennel/internal/discovery"
 	eventbus "MattiasHognas/Kennel/internal/events"
+
+	"golang.org/x/sync/errgroup"
 )
 
 type PlanTask struct {
@@ -17,8 +19,10 @@ type PlanTask struct {
 	Task  string `json:"task"`
 }
 
+type TaskStream []PlanTask
+
 type Plan struct {
-	Steps []PlanTask `json:"steps"`
+	Streams []TaskStream `json:"streams"`
 }
 
 type Repository interface {
@@ -84,7 +88,8 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 
 	planPrompt := fmt.Sprintf(`Create an execution plan based on these instructions: %s
 
-You must output a JSON object containing an array of 'steps'. Each step must have an 'agent' and a 'task' string.
+You must output a JSON object containing an array of 'streams', where each stream is an array of tasks that must run sequentially.
+Each task must have an 'agent' and a 'task' string. Allow parallel streams.
 Available or configured agents: %v
 Ensure the response is purely the JSON or embedded in a Markdown block.`, instructions, configuredAgents)
 
@@ -110,36 +115,70 @@ Ensure the response is purely the JSON or embedded in a Markdown block.`, instru
 		return s.failStop(ctx, 0, "planning_json_parse_failed", err)
 	}
 
-	runSequence := []PlanTask{
-		{Agent: "branch-setup", Task: "Initialize branch context based on plan."},
+	// 1. Run branch-setup sequentially
+	branchSetupTask := PlanTask{Agent: "branch-setup", Task: "Initialize branch context based on plan."}
+	setupDef, ok := agentMap[branchSetupTask.Agent]
+	if !ok {
+		return s.failStop(ctx, 1, "agent_not_found", fmt.Errorf("agent %s not found", branchSetupTask.Agent))
 	}
-	runSequence = append(runSequence, plan.Steps...)
-	currentPrompt := ""
 
-	for i, step := range runSequence {
-		def, ok := agentMap[step.Agent]
-		if !ok {
-			return s.failStop(ctx, i+1, "agent_not_found", fmt.Errorf("agent %s not found", step.Agent))
-		}
+	setupWrapper, err := s.AcpFactory(ctx, setupDef.LaunchConfig.Binary, setupDef.LaunchConfig.Args, s.EventBus, branchSetupTask.Agent)
+	if err != nil {
+		return s.failStop(ctx, 1, "launch_failed", err)
+	}
 
-		wrapper, err := s.AcpFactory(ctx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, step.Agent)
-		if err != nil {
-			return s.failStop(ctx, i+1, "launch_failed", err)
-		}
+	setupOut, err := setupWrapper.Prompt(ctx, fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", branchSetupTask.Task, rawJSON))
+	if err != nil {
+		setupWrapper.Close()
+		return s.failStop(ctx, 1, "execution_failed", err)
+	}
+	setupWrapper.Close()
 
-		promptContext := fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", step.Task, currentPrompt)
-		out, err := wrapper.Prompt(ctx, promptContext)
-		if err != nil {
-			wrapper.Close()
-			return s.failStop(ctx, i+1, "execution_failed", err)
-		}
+	if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, 1, "completed", setupOut); saveErr != nil {
+		return saveErr
+	}
 
-		wrapper.Close()
-		currentPrompt = out
+	// 2. Run streams in parallel
+	g, gCtx := errgroup.WithContext(ctx)
 
-		if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, i+1, "completed", out); saveErr != nil {
-			return saveErr
-		}
+	for streamIdx, stream := range plan.Streams {
+		streamIdx := streamIdx
+		stream := stream
+
+		g.Go(func() error {
+			currentPrompt := setupOut
+			for stepIdx, step := range stream {
+				def, ok := agentMap[step.Agent]
+				if !ok {
+					return fmt.Errorf("agent %s not found in stream %d", step.Agent, streamIdx)
+				}
+
+				wrapper, err := s.AcpFactory(gCtx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, step.Agent)
+				if err != nil {
+					return fmt.Errorf("launch_failed for %s: %w", step.Agent, err)
+				}
+
+				promptContext := fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", step.Task, currentPrompt)
+				out, err := wrapper.Prompt(gCtx, promptContext)
+				if err != nil {
+					wrapper.Close()
+					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
+				}
+
+				wrapper.Close()
+				currentPrompt = out
+
+				// Checkpoint sequentially or with some ID mapping
+				if saveErr := s.Repo.CheckpointSupervisorRun(gCtx, s.ProjectID, 2+streamIdx*100+stepIdx, "completed", out); saveErr != nil {
+					return saveErr
+				}
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return s.failStop(ctx, -1, "stream_execution_failed", err)
 	}
 
 	return nil
