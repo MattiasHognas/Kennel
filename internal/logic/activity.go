@@ -8,8 +8,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-const supervisorPollInterval = 100 * time.Millisecond
-
 func waitForActivity(source ActivitySource) tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-source.channel
@@ -49,6 +47,22 @@ func (m *Model) BuildActivitySources() []ActivitySource {
 	return sources
 }
 
+func (m *Model) BuildSupervisorSources() []supervisorSource {
+	sources := make([]supervisorSource, 0)
+	for projectIndex := range m.projects {
+		channel := m.projects[projectIndex].Runtime.SupervisorEvents
+		if channel == nil {
+			continue
+		}
+
+		sources = append(sources, supervisorSource{
+			projectIndex: projectIndex,
+			channel:      channel,
+		})
+	}
+	return sources
+}
+
 func (m *Model) recordActivity(source ActivitySource, text string) {
 	if source.projectIndex < 0 || source.projectIndex >= len(m.projects) {
 		return
@@ -70,15 +84,17 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 }
 
 func waitForSupervisorUpdate(source supervisorSource) tea.Cmd {
-	return tea.Tick(supervisorPollInterval, func(time.Time) tea.Msg {
-		select {
-		case _, ok := <-source.channel:
-			if !ok {
-				return nil
-			}
-			return supervisorSyncMsg{source: source}
-		default:
-			return supervisorPollMsg{source: source}
+	return func() tea.Msg {
+		event, ok := <-source.channel
+		if !ok {
+			return nil
 		}
-	})
+
+		syncEvent, ok := event.Payload.(eventbus.SupervisorSyncEvent)
+		if !ok {
+			return supervisorSyncMsg{source: source}
+		}
+
+		return supervisorSyncMsg{source: source, event: syncEvent}
+	}
 }

@@ -102,10 +102,21 @@ func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
 	if _, err := repo.NewActivity(context.Background(), storedProject.ID, sql.NullInt64{Int64: agentRecord.ID, Valid: true}, "planner: completed"); err != nil {
 		t.Fatalf("new activity: %v", err)
 	}
+	eb.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.SupervisorSyncEvent{
+		ProjectID: storedProject.ID,
+		Agent:     "planner",
+		State:     agent.Completed.String(),
+		Activity:  "completed",
+	}})
 
-	updatedModel, cmd := m.Update(supervisorSyncMsg{source: source})
+	msg := waitForSupervisorUpdate(source)()
+	if msg == nil {
+		t.Fatal("expected supervisor sync message")
+	}
+
+	updatedModel, cmd := m.Update(msg)
 	if cmd == nil {
-		t.Fatal("expected supervisor polling command")
+		t.Fatal("expected supervisor listener command")
 	}
 	updated, ok := updatedModel.(Model)
 	if !ok {

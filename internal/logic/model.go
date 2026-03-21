@@ -37,12 +37,12 @@ type ProjectState struct {
 }
 
 type ProjectRuntime struct {
-	Agents     []agent.AgentContract
-	AgentIDs   []int64
-	Activities []ActivityEntry
-	Supervisor *supervisor.Supervisor
+	Agents           []agent.AgentContract
+	AgentIDs         []int64
+	Activities       []ActivityEntry
+	Supervisor       *supervisor.Supervisor
 	SupervisorEvents eventbus.EventChan
-	CancelCtx  context.CancelFunc
+	CancelCtx        context.CancelFunc
 }
 
 type Project struct {
@@ -76,10 +76,7 @@ type supervisorSource struct {
 
 type supervisorSyncMsg struct {
 	source supervisorSource
-}
-
-type supervisorPollMsg struct {
-	source supervisorSource
+	event  eventbus.SupervisorSyncEvent
 }
 
 type Keymap struct {
@@ -205,9 +202,13 @@ func newAgentTable(width int, styles table.Styles) table.Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := make([]tea.Cmd, 0, len(m.Sources))
+	supervisorSources := m.BuildSupervisorSources()
+	cmds := make([]tea.Cmd, 0, len(m.Sources)+len(supervisorSources))
 	for _, source := range m.Sources {
 		cmds = append(cmds, waitForActivity(source))
+	}
+	for _, source := range supervisorSources {
+		cmds = append(cmds, waitForSupervisorUpdate(source))
 	}
 	return tea.Batch(cmds...)
 }
@@ -225,13 +226,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForActivity(msg.source)
 
 	case supervisorSyncMsg:
-		m.syncProjectFromRepository(msg.source.projectIndex)
-		return m, waitForSupervisorUpdate(msg.source)
-
-	case supervisorPollMsg:
 		if !m.shouldListenForSupervisor(msg.source) {
 			return m, nil
 		}
+		if msg.event.ProjectID > 0 {
+			project := &m.projects[msg.source.projectIndex]
+			if project.Config.ProjectID > 0 && project.Config.ProjectID != msg.event.ProjectID {
+				return m, waitForSupervisorUpdate(msg.source)
+			}
+		}
+		m.syncProjectFromRepository(msg.source.projectIndex)
 		return m, waitForSupervisorUpdate(msg.source)
 	}
 
