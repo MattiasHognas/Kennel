@@ -21,7 +21,7 @@ func (m *Model) startSelectedProject() {
 	project.Runtime.CancelCtx = cancel
 
 	eb := eventbus.NewEventBus()
-	sup := supervisor.NewSupervisor(m.repository, eb, agentsDir, project.Config.ProjectID, project.Config.Name)
+	sup := supervisor.NewSupervisor(m.repository, eb, agentsDir, project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
 	project.Runtime.Supervisor = sup
 
 	var configuredAgents []string

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 
 	"MattiasHognas/Kennel/internal/acp"
+	repository "MattiasHognas/Kennel/internal/data"
 	"MattiasHognas/Kennel/internal/discovery"
 	eventbus "MattiasHognas/Kennel/internal/events"
 
@@ -27,6 +29,9 @@ type Plan struct {
 
 type Repository interface {
 	CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error
+	ReadProject(ctx context.Context, projectID int64) (repository.Project, error)
+	UpdateAgentOutput(ctx context.Context, agentID int64, output string) error
+	UpdateAgentState(ctx context.Context, agentID int64, state string) error
 }
 
 type ACPClient interface {
@@ -34,10 +39,10 @@ type ACPClient interface {
 	Close() error
 }
 
-type ACPFactory func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, topic string) (ACPClient, error)
+type ACPFactory func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (ACPClient, error)
 
-func DefaultACPFactory(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, topic string) (ACPClient, error) {
-	return acp.NewWrapper(ctx, binary, args, eb, topic)
+func DefaultACPFactory(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (ACPClient, error) {
+	return acp.NewWrapper(ctx, binary, args, eb, workplace, topic)
 }
 
 type Supervisor struct {
@@ -46,22 +51,33 @@ type Supervisor struct {
 	AgentsDir   string
 	ProjectID   int64
 	ProjectName string
+	Workplace   string
 	AcpFactory  ACPFactory
 }
 
-func NewSupervisor(repo Repository, eb *eventbus.EventBus, agentsDir string, projectID int64, projectName string) *Supervisor {
+func NewSupervisor(repo Repository, eb *eventbus.EventBus, agentsDir string, projectID int64, projectName string, workplace string) *Supervisor {
 	return &Supervisor{
 		Repo:        repo,
 		EventBus:    eb,
 		AgentsDir:   agentsDir,
 		ProjectID:   projectID,
 		ProjectName: projectName,
+		Workplace:   workplace,
 		AcpFactory:  DefaultACPFactory,
 	}
 }
 
 func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configuredAgents []string) error {
-	// 1. Load agent definitions
+	proj, err := s.Repo.ReadProject(ctx, s.ProjectID)
+	if err != nil {
+		return s.failStop(ctx, 0, "read_project_failed", err)
+	}
+
+	agentStateMap := make(map[string]repository.Agent)
+	for _, a := range proj.Agents {
+		agentStateMap[a.Name] = a
+	}
+
 	defs, err := discovery.LoadAgentDefinitions(s.AgentsDir)
 	if err != nil {
 		return s.failStop(ctx, -1, "discovery_failed", err)
@@ -80,22 +96,35 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 		}
 	}
 
-	plannerWrapper, err := s.AcpFactory(ctx, plannerDef.LaunchConfig.Binary, plannerDef.LaunchConfig.Args, s.EventBus, "planner")
-	if err != nil {
-		return s.failStop(ctx, 0, "planning_launch_failed", err)
-	}
-	defer plannerWrapper.Close()
+	var planOutput string
+	plannerRec, foundPlanner := agentStateMap["planner"]
+	if foundPlanner && plannerRec.State == "completed" {
+		planOutput = plannerRec.Output
+	} else {
+		plannerWrapper, err := s.AcpFactory(ctx, plannerDef.LaunchConfig.Binary, plannerDef.LaunchConfig.Args, s.EventBus, s.Workplace, "planner")
+		if err != nil {
+			return s.failStop(ctx, 0, "planning_launch_failed", err)
+		}
+		defer plannerWrapper.Close()
 
-	planPrompt := fmt.Sprintf(`Create an execution plan based on these instructions: %s
+		planPrompt := fmt.Sprintf(`Create an execution plan based on these instructions: %s
 
 You must output a JSON object containing an array of 'streams', where each stream is an array of tasks that must run sequentially.
 Each task must have an 'agent' and a 'task' string. Allow parallel streams.
 Available or configured agents: %v
 Ensure the response is purely the JSON or embedded in a Markdown block.`, instructions, configuredAgents)
 
-	planOutput, err := plannerWrapper.Prompt(ctx, planPrompt)
-	if err != nil {
-		return s.failStop(ctx, 0, "planning_failed", err)
+		planOutput, err = plannerWrapper.Prompt(ctx, planPrompt)
+		if err != nil {
+			return s.failStop(ctx, 0, "planning_failed", err)
+		}
+
+		if foundPlanner {
+			if outErr := s.Repo.UpdateAgentOutput(ctx, plannerRec.ID, planOutput); outErr != nil {
+				log.Printf("Failed to checkpoint planner output: %v", outErr)
+			}
+			s.Repo.UpdateAgentState(ctx, plannerRec.ID, "completed")
+		}
 	}
 
 	rawJSON := planOutput
@@ -115,30 +144,42 @@ Ensure the response is purely the JSON or embedded in a Markdown block.`, instru
 		return s.failStop(ctx, 0, "planning_json_parse_failed", err)
 	}
 
-	// 1. Run branch-setup sequentially
 	branchSetupTask := PlanTask{Agent: "branch-setup", Task: "Initialize branch context based on plan."}
 	setupDef, ok := agentMap[branchSetupTask.Agent]
 	if !ok {
 		return s.failStop(ctx, 1, "agent_not_found", fmt.Errorf("agent %s not found", branchSetupTask.Agent))
 	}
 
-	setupWrapper, err := s.AcpFactory(ctx, setupDef.LaunchConfig.Binary, setupDef.LaunchConfig.Args, s.EventBus, branchSetupTask.Agent)
-	if err != nil {
-		return s.failStop(ctx, 1, "launch_failed", err)
+	var setupOut string
+	agentRec, found := agentStateMap[branchSetupTask.Agent]
+	if !found {
+		return s.failStop(ctx, 1, "agent_state_not_found", fmt.Errorf("agent state for %s not found", branchSetupTask.Agent))
 	}
 
-	setupOut, err := setupWrapper.Prompt(ctx, fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", branchSetupTask.Task, rawJSON))
-	if err != nil {
+	if agentRec.State != "completed" {
+		setupWrapper, err := s.AcpFactory(ctx, setupDef.LaunchConfig.Binary, setupDef.LaunchConfig.Args, s.EventBus, s.Workplace, branchSetupTask.Agent)
+		if err != nil {
+			return s.failStop(ctx, 1, "launch_failed", err)
+		}
+
+		setupOut, err = setupWrapper.Prompt(ctx, fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", branchSetupTask.Task, rawJSON))
 		setupWrapper.Close()
-		return s.failStop(ctx, 1, "execution_failed", err)
+		if err != nil {
+			return s.failStop(ctx, 1, "execution_failed", err)
+		}
+
+		if outErr := s.Repo.UpdateAgentOutput(ctx, agentRec.ID, setupOut); outErr != nil {
+			log.Printf("Failed to checkpoint agent output: %v", outErr)
+		}
+		s.Repo.UpdateAgentState(ctx, agentRec.ID, "completed")
+	} else {
+		setupOut = agentRec.Output
 	}
-	setupWrapper.Close()
 
 	if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, 1, "completed", setupOut); saveErr != nil {
 		return saveErr
 	}
 
-	// 2. Run streams in parallel
 	g, gCtx := errgroup.WithContext(ctx)
 
 	for streamIdx, stream := range plan.Streams {
@@ -153,7 +194,18 @@ Ensure the response is purely the JSON or embedded in a Markdown block.`, instru
 					return fmt.Errorf("agent %s not found in stream %d", step.Agent, streamIdx)
 				}
 
-				wrapper, err := s.AcpFactory(gCtx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, step.Agent)
+				agentRec, found := agentStateMap[step.Agent]
+
+				if !found {
+					return fmt.Errorf("agent %s not found in project state for stream %d", step.Agent, streamIdx)
+				}
+
+				if agentRec.State == "completed" {
+					currentPrompt = agentRec.Output
+					continue
+				}
+
+				wrapper, err := s.AcpFactory(gCtx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, s.Workplace, step.Agent)
 				if err != nil {
 					return fmt.Errorf("launch_failed for %s: %w", step.Agent, err)
 				}
@@ -168,7 +220,11 @@ Ensure the response is purely the JSON or embedded in a Markdown block.`, instru
 				wrapper.Close()
 				currentPrompt = out
 
-				// Checkpoint sequentially or with some ID mapping
+				if outErr := s.Repo.UpdateAgentOutput(gCtx, agentRec.ID, currentPrompt); outErr != nil {
+					log.Printf("Failed to checkpoint agent output: %v", outErr)
+				}
+				s.Repo.UpdateAgentState(gCtx, agentRec.ID, "completed")
+
 				if saveErr := s.Repo.CheckpointSupervisorRun(gCtx, s.ProjectID, 2+streamIdx*100+stepIdx, "completed", out); saveErr != nil {
 					return saveErr
 				}

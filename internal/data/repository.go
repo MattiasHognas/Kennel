@@ -31,6 +31,7 @@ type Agent struct {
 	ProjectID int64
 	Name      string
 	State     string
+	Output    string
 	CreatedAt time.Time
 }
 
@@ -257,6 +258,31 @@ func (r *SQLiteRepository) UpdateAgentState(ctx context.Context, agentID int64, 
 	return nil
 }
 
+func (r *SQLiteRepository) UpdateAgentOutput(ctx context.Context, agentID int64, output string) error {
+	if agentID <= 0 {
+		return errors.New("agent id must be positive")
+	}
+
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE agents
+		SET output = ?
+		WHERE id = ?
+	`, output, agentID)
+	if err != nil {
+		return fmt.Errorf("update agent output: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check updated rows: %w", err)
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+
+	return nil
+}
+
 func (r *SQLiteRepository) NewActivity(ctx context.Context, projectID int64, agentID sql.NullInt64, text string) (Activity, error) {
 	text = strings.TrimSpace(text)
 	if projectID <= 0 {
@@ -385,7 +411,7 @@ func (r *SQLiteRepository) ReadProjects(ctx context.Context) ([]Project, error) 
 
 func (r *SQLiteRepository) readAgents(ctx context.Context, projectID int64) ([]Agent, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, project_id, name, state, created_at
+		SELECT id, project_id, name, state, output, created_at
 		FROM agents
 		WHERE project_id = ?
 		ORDER BY created_at ASC, id ASC
@@ -398,8 +424,8 @@ func (r *SQLiteRepository) readAgents(ctx context.Context, projectID int64) ([]A
 	agents := make([]Agent, 0)
 	for rows.Next() {
 		var agent Agent
-		if err := rows.Scan(&agent.ID, &agent.ProjectID, &agent.Name, &agent.State, &agent.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan project agent: %w", err)
+		if err := rows.Scan(&agent.ID, &agent.ProjectID, &agent.Name, &agent.State, &agent.Output, &agent.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan agent: %w", err)
 		}
 		agent.State = normalizeState(agent.State)
 		agents = append(agents, agent)
@@ -533,6 +559,36 @@ func (r *SQLiteRepository) ensureSchema(ctx context.Context) error {
 
 	if _, err := r.db.ExecContext(ctx, `UPDATE projects SET state = 'stopped' WHERE lower(state) = 'paused' OR trim(state) = ''`); err != nil {
 		return fmt.Errorf("migrate legacy project states: %w", err)
+	}
+
+	var hasOutputColumn bool
+	outRows, err := r.db.QueryContext(ctx, `PRAGMA table_info(agents)`)
+	if err != nil {
+		return fmt.Errorf("check agents table schema for output: %w", err)
+	}
+	for outRows.Next() {
+		var cid int
+		var name string
+		var typ, notnull, dfltValue, pk interface{}
+		if err := outRows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
+			outRows.Close()
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "output" {
+			hasOutputColumn = true
+			break
+		}
+	}
+	if err := outRows.Err(); err != nil {
+		outRows.Close()
+		return fmt.Errorf("iterate table_info: %w", err)
+	}
+	outRows.Close()
+
+	if !hasOutputColumn {
+		if _, err := r.db.ExecContext(ctx, `ALTER TABLE agents ADD COLUMN output TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate agents table with output column: %w", err)
+		}
 	}
 
 	return nil

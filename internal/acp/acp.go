@@ -3,7 +3,9 @@ package acp
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -36,8 +38,9 @@ type Wrapper struct {
 	session acp.SessionId
 }
 
-func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, topic string) (*Wrapper, error) {
+func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (*Wrapper, error) {
 	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = workplace
 
 	inw, err := cmd.StdinPipe()
 	if err != nil {
@@ -53,7 +56,12 @@ func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.
 		return nil, fmt.Errorf("start: %w", err)
 	}
 
-	handler := &localClient{eb: eb, topic: topic}
+	handler := &localClient{
+		eb:        eb,
+		topic:     topic,
+		workplace: workplace,
+		terminals: make(map[string]*terminalState),
+	}
 	conn := acp.NewClientSideConnection(handler, inw, outr)
 
 	_, err = conn.Initialize(ctx, acp.InitializeRequest{
@@ -148,17 +156,39 @@ func FormatPrompt(msg string, activities []string) string {
 	return sb.String()
 }
 
+type terminalState struct {
+	cmd *exec.Cmd
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (t *terminalState) Write(p []byte) (n int, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.buf.Write(p)
+}
+
+func (t *terminalState) ReadAndClear() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	res := t.buf.String()
+	t.buf.Reset()
+	return res
+}
+
 type localClient struct {
-	mu       sync.Mutex
-	eb       *eventbus.EventBus
-	topic    string
-	textChan chan string
+	mu        sync.Mutex
+	eb        *eventbus.EventBus
+	topic     string
+	workplace string
+	textChan  chan string
+
+	terminalsMu sync.Mutex
+	terminals   map[string]*terminalState
 }
 
 func (c *localClient) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
 	c.eb.Publish(c.topic, eventbus.Event{Payload: eventbus.WorkerMessageEvent{Chunk: "received update"}})
-
-	// Send text chunks to the waiting channel
 	if params.Update.AgentMessageChunk != nil {
 		if textBlock := params.Update.AgentMessageChunk.Content.Text; textBlock != nil {
 			c.mu.Lock()
@@ -175,27 +205,162 @@ func (c *localClient) SessionUpdate(ctx context.Context, params acp.SessionNotif
 	return nil
 }
 
-func (c *localClient) ReadTextFile(ctx context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	return acp.ReadTextFileResponse{}, nil
+func (c *localClient) checkInWorkplace(targetPath string) error {
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return err
+	}
+	absWorkplace, err := filepath.Abs(c.workplace)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(filepath.Clean(absTarget)+string(filepath.Separator), filepath.Clean(absWorkplace)+string(filepath.Separator)) {
+		return fmt.Errorf("path is outside of workspace")
+	}
+	return nil
 }
+
+func (c *localClient) ReadTextFile(ctx context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	err := params.Validate()
+	if err != nil {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	if err := c.checkInWorkplace(params.Path); err != nil {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+	}
+	content, err := os.ReadFile(params.Path)
+	if err != nil {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("failed to read file: %w", err)
+	}
+	return acp.ReadTextFileResponse{Content: string(content)}, nil
+}
+
 func (c *localClient) WriteTextFile(ctx context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	err := params.Validate()
+	if err != nil {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	if err := c.checkInWorkplace(params.Path); err != nil {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+	}
+	err = os.WriteFile(params.Path, []byte(params.Content), 0644)
+	if err != nil {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("failed to write file: %w", err)
+	}
 	return acp.WriteTextFileResponse{}, nil
 }
+
 func (c *localClient) RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-	return acp.RequestPermissionResponse{}, nil
+	err := params.Validate()
+	if err != nil {
+		return acp.RequestPermissionResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	var permissionOption *acp.PermissionOption
+	for _, option := range params.Options {
+		if option.Kind == acp.PermissionOptionKindAllowOnce {
+			permissionOption = &option
+			break
+		}
+	}
+	if permissionOption == nil && len(params.Options) > 0 {
+		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, fmt.Errorf("no allow once permission option found")
+	}
+	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(permissionOption.OptionId)}, nil
 }
+
 func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{}, nil
+	err := params.Validate()
+	if err != nil {
+		return acp.CreateTerminalResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	terminalCmd := exec.Command(params.Command, params.Args...)
+	terminalCmd.Dir = c.workplace
+	state := &terminalState{cmd: terminalCmd}
+	terminalCmd.Stdout = state
+	terminalCmd.Stderr = state
+	err = terminalCmd.Start()
+	if err != nil {
+		return acp.CreateTerminalResponse{}, fmt.Errorf("failed to start terminal command: %w", err)
+	}
+	termID := fmt.Sprintf("%d", terminalCmd.Process.Pid)
+	c.terminalsMu.Lock()
+	c.terminals[termID] = state
+	c.terminalsMu.Unlock()
+	go func() {
+		_ = terminalCmd.Wait()
+	}()
+	return acp.CreateTerminalResponse{TerminalId: termID}, nil
 }
+
 func (c *localClient) KillTerminalCommand(ctx context.Context, params acp.KillTerminalCommandRequest) (acp.KillTerminalCommandResponse, error) {
+	err := params.Validate()
+	if err != nil {
+		return acp.KillTerminalCommandResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	c.terminalsMu.Lock()
+	state, exists := c.terminals[params.TerminalId]
+	c.terminalsMu.Unlock()
+	if !exists {
+		return acp.KillTerminalCommandResponse{}, fmt.Errorf("invalid terminal ID")
+	}
+	if state.cmd.Process != nil {
+		_ = state.cmd.Process.Kill()
+	}
+	c.terminalsMu.Lock()
+	delete(c.terminals, params.TerminalId)
+	c.terminalsMu.Unlock()
 	return acp.KillTerminalCommandResponse{}, nil
 }
+
 func (c *localClient) TerminalOutput(ctx context.Context, params acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{}, nil
+	err := params.Validate()
+	if err != nil {
+		return acp.TerminalOutputResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	c.terminalsMu.Lock()
+	state, exists := c.terminals[params.TerminalId]
+	c.terminalsMu.Unlock()
+	if !exists {
+		return acp.TerminalOutputResponse{}, fmt.Errorf("invalid terminal ID")
+	}
+	out := state.ReadAndClear()
+	return acp.TerminalOutputResponse{Output: out}, nil
 }
+
 func (c *localClient) ReleaseTerminal(ctx context.Context, params acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	err := params.Validate()
+	if err != nil {
+		return acp.ReleaseTerminalResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	c.terminalsMu.Lock()
+	state, exists := c.terminals[params.TerminalId]
+	c.terminalsMu.Unlock()
+	if !exists {
+		return acp.ReleaseTerminalResponse{}, fmt.Errorf("invalid terminal ID")
+	}
+	if state.cmd.Process != nil {
+		_ = state.cmd.Process.Release()
+	}
 	return acp.ReleaseTerminalResponse{}, nil
 }
+
 func (c *localClient) WaitForTerminalExit(ctx context.Context, params acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	err := params.Validate()
+	if err != nil {
+		return acp.WaitForTerminalExitResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	c.terminalsMu.Lock()
+	state, exists := c.terminals[params.TerminalId]
+	c.terminalsMu.Unlock()
+	if !exists {
+		return acp.WaitForTerminalExitResponse{}, fmt.Errorf("invalid terminal ID")
+	}
+	if state.cmd.Process != nil {
+		_ = state.cmd.Wait()
+		if state.cmd.ProcessState != nil {
+			exitCode := state.cmd.ProcessState.ExitCode()
+			return acp.WaitForTerminalExitResponse{ExitCode: &exitCode}, nil
+		}
+	}
 	return acp.WaitForTerminalExitResponse{}, nil
 }
