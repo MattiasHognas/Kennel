@@ -47,6 +47,22 @@ func (m *Model) BuildActivitySources() []ActivitySource {
 	return sources
 }
 
+func (m *Model) BuildSupervisorSources() []supervisorSource {
+	sources := make([]supervisorSource, 0)
+	for projectIndex := range m.projects {
+		channel := m.projects[projectIndex].Runtime.SupervisorEvents
+		if channel == nil {
+			continue
+		}
+
+		sources = append(sources, supervisorSource{
+			projectIndex: projectIndex,
+			channel:      channel,
+		})
+	}
+	return sources
+}
+
 func (m *Model) recordActivity(source ActivitySource, text string) {
 	if source.projectIndex < 0 || source.projectIndex >= len(m.projects) {
 		return
@@ -65,4 +81,20 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 	m.persistActivity(project, source.agentIndex, activityText)
 
 	m.refreshProjectAndSelection(source.projectIndex)
+}
+
+func waitForSupervisorUpdate(source supervisorSource) tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-source.channel
+		if !ok {
+			return nil
+		}
+
+		syncEvent, ok := event.Payload.(eventbus.SupervisorSyncEvent)
+		if !ok {
+			return supervisorSyncMsg{source: source}
+		}
+
+		return supervisorSyncMsg{source: source, event: syncEvent}
+	}
 }

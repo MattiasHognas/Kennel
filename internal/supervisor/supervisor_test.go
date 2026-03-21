@@ -2,37 +2,277 @@ package supervisor_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"MattiasHognas/Kennel/internal/acp"
+	repository "MattiasHognas/Kennel/internal/data"
 	eventbus "MattiasHognas/Kennel/internal/events"
 	"MattiasHognas/Kennel/internal/supervisor"
 )
 
-type mockRepo struct{}
+type stubACPClient struct {
+	response string
+	messages *[]string
+}
 
-func (m *mockRepo) CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error {
+func (c *stubACPClient) Prompt(ctx context.Context, msg string) (string, error) {
+	if c.messages != nil {
+		*c.messages = append(*c.messages, msg)
+	}
+	return c.response, nil
+}
+
+func (c *stubACPClient) Close() error { return nil }
+
+type trackingRepo struct {
+	*repository.SQLiteRepository
+	checkpoints []string
+}
+
+func (r *trackingRepo) CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error {
+	r.checkpoints = append(r.checkpoints, status)
 	return nil
 }
 
-func TestExecutionFlowSupervisor(t *testing.T) {
+func TestRunPlanAddsMissingAgentsAndPersistsPlannerResult(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
 	eb := eventbus.NewEventBus()
-	super := supervisor.NewSupervisor(&mockRepo{}, eb, "testdata/agents", 1, "test")
+	syncCh := eb.Subscribe(eventbus.SupervisorTopic)
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
-	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, topic string) (supervisor.ACPClient, error) {
-		return &acp.FakeClient{Response: `{"streams": [[{"agent": "frontend-developer", "task": "hello"}]]}`}, nil
+	var topics []string
+	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+		topics = append(topics, topic)
+
+		switch topic {
+		case "planner":
+			return &stubACPClient{response: `{"streams":[[{"agent":"frontend-developer","task":"Build UI"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready"}, nil
+		case "frontend-developer":
+			return &stubACPClient{response: "frontend done"}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
 	}
 
-	ctx := context.Background()
-	// testdata/agents doesnt actually exist but since we overridden AcpFactory
-	// wait, RunPlan loops over LoadAgentDefinitions so we need to either mock it
-	// or create an empty directory.
-	// We will supply an empty list. Since it doesn't find config, it fails with "agent branch-setup not found".
-	// Let's test it until fail at least to just compile it.
-
-	err := super.RunPlan(ctx, "execute phase 6 integration fake", []string{})
-	if err != nil && !strings.Contains(err.Error(), "agent branch-setup not found") {
-		// we just want to ensure it compiles
+	if err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
 	}
+
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+
+	assertAgentState(t, stored.Agents, "planner", "completed", `{"streams":[[{"agent":"frontend-developer","task":"Build UI"}]]}`)
+	assertAgentState(t, stored.Agents, "branch-setup", "completed", "branch ready")
+	assertAgentState(t, stored.Agents, "frontend-developer", "completed", "frontend done")
+	assertActivityContains(t, stored.Activities, "planner: completed")
+	assertActivityContains(t, stored.Activities, "frontend-developer: completed")
+
+	if strings.Join(topics, ",") != "planner,branch-setup,frontend-developer" {
+		t.Fatalf("ACP topics = %v, want planner, branch-setup, frontend-developer", topics)
+	}
+	if len(tracking.checkpoints) == 0 {
+		t.Fatal("expected supervisor checkpoints to be recorded")
+	}
+	select {
+	case <-syncCh:
+	default:
+		t.Fatal("expected supervisor sync events to be published")
+	}
+}
+
+func TestRunPlanResolvesAgentNameVariants(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
+	eb := eventbus.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+		switch topic {
+		case "planner":
+			return &stubACPClient{response: `{"streams":[[{"agent":"Frontend Developer","task":"Build UI"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready"}, nil
+		case "frontend-developer":
+			return &stubACPClient{response: "frontend done"}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+
+	assertAgentState(t, stored.Agents, "frontend-developer", "completed", "frontend done")
+}
+
+func TestRunPlanAcceptsGeneralPurposeFallback(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup")
+	eb := eventbus.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+		switch topic {
+		case "planner":
+			return &stubACPClient{response: `{"streams":[[{"agent":"general_purpose","task":"Handle the implementation directly"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready"}, nil
+		case "general-purpose":
+			return &stubACPClient{response: "generic work done"}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", nil); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+
+	assertAgentState(t, stored.Agents, "general-purpose", "completed", "generic work done")
+}
+
+func TestRunPlanRejectsUnknownAgentBeforeExecution(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup")
+	eb := eventbus.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	var topics []string
+	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+		topics = append(topics, topic)
+		return &stubACPClient{response: `{"streams":[[{"agent":"unknown-agent","task":"Do work"}]]}`}, nil
+	}
+
+	err := super.RunPlan(context.Background(), "ship it", nil)
+	if err == nil {
+		t.Fatal("RunPlan returned nil error, want invalid-agent failure")
+	}
+	if !strings.Contains(err.Error(), "agent unknown-agent not found") {
+		t.Fatalf("RunPlan error = %v, want unknown agent failure", err)
+	}
+	if strings.Join(topics, ",") != "planner" {
+		t.Fatalf("ACP topics = %v, want only planner", topics)
+	}
+
+	stored, readErr := repo.ReadProject(context.Background(), project.ID)
+	if readErr != nil {
+		t.Fatalf("ReadProject returned error: %v", readErr)
+	}
+	if len(stored.Agents) != 1 {
+		t.Fatalf("agent count = %d, want 1 planner after invalid plan", len(stored.Agents))
+	}
+	if stored.Agents[0].Name != "planner" {
+		t.Fatalf("persisted agent = %q, want planner", stored.Agents[0].Name)
+	}
+	if len(tracking.checkpoints) == 0 || tracking.checkpoints[len(tracking.checkpoints)-1] != "planning_validation_failed" {
+		t.Fatalf("checkpoint statuses = %v, want planning_validation_failed", tracking.checkpoints)
+	}
+}
+
+func newTestRepository(t *testing.T) *repository.SQLiteRepository {
+	t.Helper()
+
+	repo, err := repository.NewSQLiteRepository(filepath.Join(t.TempDir(), "supervisor.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteRepository returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = repo.Close()
+	})
+
+	return repo
+}
+
+func newTestProject(t *testing.T, repo *repository.SQLiteRepository) repository.Project {
+	t.Helper()
+
+	project, err := repo.CreateProject(context.Background(), "test-project", t.TempDir(), "build something")
+	if err != nil {
+		t.Fatalf("CreateProject returned error: %v", err)
+	}
+
+	return project
+}
+
+func newTestAgentsRoot(t *testing.T, agentNames ...string) string {
+	t.Helper()
+
+	root := t.TempDir()
+	agentsDir := filepath.Join(root, "agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+
+	for _, agentName := range agentNames {
+		agentDir := filepath.Join(agentsDir, agentName)
+		if err := os.MkdirAll(agentDir, 0755); err != nil {
+			t.Fatalf("MkdirAll returned error: %v", err)
+		}
+		instructionsPath := filepath.Join(agentDir, "instructions.md")
+		if err := os.WriteFile(instructionsPath, []byte("# test instructions\n"), 0644); err != nil {
+			t.Fatalf("WriteFile returned error: %v", err)
+		}
+	}
+
+	return root
+}
+
+func assertAgentState(t *testing.T, agents []repository.Agent, name, state, output string) {
+	t.Helper()
+
+	for _, agent := range agents {
+		if agent.Name != name {
+			continue
+		}
+		if agent.State != state {
+			t.Fatalf("agent %q state = %q, want %q", name, agent.State, state)
+		}
+		if agent.Output != output {
+			t.Fatalf("agent %q output = %q, want %q", name, agent.Output, output)
+		}
+		return
+	}
+
+	t.Fatalf("agent %q not found in project", name)
+}
+
+func assertActivityContains(t *testing.T, activities []repository.Activity, want string) {
+	t.Helper()
+
+	for _, activity := range activities {
+		if activity.Text == want {
+			return
+		}
+	}
+
+	t.Fatalf("activity %q not found in %#v", want, activities)
 }

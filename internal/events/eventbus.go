@@ -2,8 +2,16 @@ package eventbus
 
 import "sync"
 
+const SupervisorTopic = "supervisor"
+
 // Execution event types
 type PlanUpdateEvent struct{ Plan string }
+type SupervisorSyncEvent struct {
+	ProjectID int64
+	Agent     string
+	State     string
+	Activity  string
+}
 type WorkerMessageEvent struct{ Chunk string }
 type ToolCallEvent struct {
 	ToolName string

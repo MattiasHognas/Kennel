@@ -37,11 +37,12 @@ type ProjectState struct {
 }
 
 type ProjectRuntime struct {
-	Agents     []agent.AgentContract
-	AgentIDs   []int64
-	Activities []ActivityEntry
-	Supervisor *supervisor.Supervisor
-	CancelCtx  context.CancelFunc
+	Agents           []agent.AgentContract
+	AgentIDs         []int64
+	Activities       []ActivityEntry
+	Supervisor       *supervisor.Supervisor
+	SupervisorEvents eventbus.EventChan
+	CancelCtx        context.CancelFunc
 }
 
 type Project struct {
@@ -66,6 +67,16 @@ type ActivitySource struct {
 type activityMsg struct {
 	source ActivitySource
 	text   string
+}
+
+type supervisorSource struct {
+	projectIndex int
+	channel      eventbus.EventChan
+}
+
+type supervisorSyncMsg struct {
+	source supervisorSource
+	event  eventbus.SupervisorSyncEvent
 }
 
 type Keymap struct {
@@ -191,9 +202,13 @@ func newAgentTable(width int, styles table.Styles) table.Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := make([]tea.Cmd, 0, len(m.Sources))
+	supervisorSources := m.BuildSupervisorSources()
+	cmds := make([]tea.Cmd, 0, len(m.Sources)+len(supervisorSources))
 	for _, source := range m.Sources {
 		cmds = append(cmds, waitForActivity(source))
+	}
+	for _, source := range supervisorSources {
+		cmds = append(cmds, waitForSupervisorUpdate(source))
 	}
 	return tea.Batch(cmds...)
 }
@@ -209,6 +224,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case activityMsg:
 		m.recordActivity(msg.source, msg.text)
 		return m, waitForActivity(msg.source)
+
+	case supervisorSyncMsg:
+		if !m.shouldListenForSupervisor(msg.source) {
+			return m, nil
+		}
+		if msg.event.ProjectID > 0 {
+			project := &m.projects[msg.source.projectIndex]
+			if project.Config.ProjectID > 0 && project.Config.ProjectID != msg.event.ProjectID {
+				return m, waitForSupervisorUpdate(msg.source)
+			}
+		}
+		m.syncProjectFromRepository(msg.source.projectIndex)
+		return m, waitForSupervisorUpdate(msg.source)
 	}
 
 	if m.mode == projectEditorViewMode {
@@ -271,7 +299,7 @@ func (m Model) View() tea.View {
 		lipgloss.JoinHorizontal(lipgloss.Top, m.tableViews()...),
 		"",
 		"tab/shift+tab switches tables, enter edits the selected project, space cycles state, s starts, p stops.",
-		"Activities come from agents and are shown for the currently selected project.",
+		"Activities come from agents and supervisor updates for the currently selected project.",
 	)
 
 	v := tea.NewView(content)
@@ -478,10 +506,10 @@ func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bo
 	case key.Matches(msg, m.keymap.startProject):
 		if m.focusIndex == 1 {
 			m.startSelectedAgent()
+			return false, true, nil
 		} else {
-			m.startSelectedProject()
+			return false, true, m.startSelectedProject()
 		}
-		return false, true, nil
 	case key.Matches(msg, m.keymap.stopProject):
 		if m.focusIndex == 1 {
 			m.stopSelectedAgent()
@@ -492,10 +520,10 @@ func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bo
 	case key.Matches(msg, m.keymap.toggleProject):
 		if m.focusIndex == 1 {
 			m.cycleSelectedAgentState()
+			return false, true, nil
 		} else {
-			m.cycleSelectedProjectState()
+			return false, true, m.cycleSelectedProjectState()
 		}
-		return false, true, nil
 	default:
 		return false, false, nil
 	}
@@ -551,6 +579,76 @@ func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
 	if _, err := m.repository.NewActivity(context.Background(), project.Config.ProjectID, agentID, text); err != nil {
 		fmt.Fprintf(os.Stderr, "persist activity: %v\n", err)
 	}
+}
+
+func (m *Model) shouldListenForSupervisor(source supervisorSource) bool {
+	if source.projectIndex < 0 || source.projectIndex >= len(m.projects) {
+		return false
+	}
+
+	return m.projects[source.projectIndex].Runtime.SupervisorEvents == source.channel
+}
+
+func (m *Model) syncProjectFromRepository(projectIndex int) {
+	if m.repository == nil || projectIndex < 0 || projectIndex >= len(m.projects) {
+		return
+	}
+
+	project := &m.projects[projectIndex]
+	if project.Config.ProjectID <= 0 {
+		return
+	}
+
+	storedProject, err := m.repository.ReadProject(context.Background(), project.Config.ProjectID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sync project from repository: %v\n", err)
+		return
+	}
+
+	preservedSupervisor := project.Runtime.Supervisor
+	preservedSupervisorEvents := project.Runtime.SupervisorEvents
+	preservedCancel := project.Runtime.CancelCtx
+
+	agents := make([]agent.AgentContract, 0, len(storedProject.Agents))
+	agentIDs := make([]int64, 0, len(storedProject.Agents))
+	for _, storedAgent := range storedProject.Agents {
+		agents = append(agents, restorePersistedAgent(storedAgent.Name, storedAgent.State))
+		agentIDs = append(agentIDs, storedAgent.ID)
+	}
+
+	activities := make([]ActivityEntry, 0, len(storedProject.Activities))
+	for _, activity := range storedProject.Activities {
+		activities = append(activities, ActivityEntry{
+			Timestamp: activity.CreatedAt.Format("15:04:05"),
+			Text:      activity.Text,
+		})
+	}
+
+	project.Config.Name = storedProject.Name
+	project.Config.Workplace = storedProject.Workplace
+	project.Config.Instructions = storedProject.Instructions
+	project.State.State = parseAgentState(storedProject.State)
+	project.Runtime = ProjectRuntime{
+		Agents:           agents,
+		AgentIDs:         agentIDs,
+		Activities:       activities,
+		Supervisor:       preservedSupervisor,
+		SupervisorEvents: preservedSupervisorEvents,
+		CancelCtx:        preservedCancel,
+	}
+
+	m.refreshProjectAndSelection(projectIndex)
+}
+
+func restorePersistedAgent(name string, persistedState string) agent.AgentContract {
+	a := agent.NewAgent(name)
+	switch persistedState {
+	case agent.Running.String():
+		a.Run(context.Background())
+	case agent.Completed.String():
+		a.Complete()
+	}
+	return a
 }
 
 func (m Model) Shutdown() {

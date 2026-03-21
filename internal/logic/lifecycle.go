@@ -6,23 +6,27 @@ import (
 	eventbus "MattiasHognas/Kennel/internal/events"
 	"MattiasHognas/Kennel/internal/supervisor"
 	agent "MattiasHognas/Kennel/internal/workers"
+
+	tea "charm.land/bubbletea/v2"
 )
 
-const agentsDir = "C:\\source\\Kennel"
+const agentsDir = "C:\\source\\Kennel\\"
 
-func (m *Model) startSelectedProject() {
+func (m *Model) startSelectedProject() tea.Cmd {
 	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
 	if project == nil || project.State.State == agent.Running || project.State.State == agent.Completed {
-		return
+		return nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	project.Runtime.CancelCtx = cancel
 
 	eb := eventbus.NewEventBus()
-	sup := supervisor.NewSupervisor(m.repository, eb, agentsDir, project.Config.ProjectID, project.Config.Name)
+	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic)}
+	sup := supervisor.NewSupervisor(m.repository, eb, agentsDir, project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
 	project.Runtime.Supervisor = sup
+	project.Runtime.SupervisorEvents = source.channel
 
 	var configuredAgents []string
 	for _, agentInstance := range project.Runtime.Agents {
@@ -37,6 +41,8 @@ func (m *Model) startSelectedProject() {
 	m.persistProjectState(project)
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(projectIndex)
+
+	return waitForSupervisorUpdate(source)
 }
 
 func (m *Model) stopSelectedProject() {
@@ -51,6 +57,10 @@ func (m *Model) stopSelectedProject() {
 		project.Runtime.CancelCtx = nil
 	}
 	if project.Runtime.Supervisor != nil {
+		if project.Runtime.SupervisorEvents != nil {
+			project.Runtime.Supervisor.EventBus.Unsubscribe(eventbus.SupervisorTopic, project.Runtime.SupervisorEvents)
+			project.Runtime.SupervisorEvents = nil
+		}
 		project.Runtime.Supervisor = nil
 	}
 
@@ -77,6 +87,10 @@ func (m *Model) completeSelectedProject() {
 		project.Runtime.CancelCtx = nil
 	}
 	if project.Runtime.Supervisor != nil {
+		if project.Runtime.SupervisorEvents != nil {
+			project.Runtime.Supervisor.EventBus.Unsubscribe(eventbus.SupervisorTopic, project.Runtime.SupervisorEvents)
+			project.Runtime.SupervisorEvents = nil
+		}
 		project.Runtime.Supervisor = nil
 	}
 
@@ -125,20 +139,21 @@ func (m *Model) completeSelectedAgent() {
 	m.refreshProjectAndSelection(m.selectedProjectIndex())
 }
 
-func (m *Model) cycleSelectedProjectState() {
+func (m *Model) cycleSelectedProjectState() tea.Cmd {
 	project := m.selectedProject()
 	if project == nil {
-		return
+		return nil
 	}
 	if project.State.State == agent.Completed {
-		return
+		return nil
 	}
 
 	switch project.State.State {
 	case agent.Stopped:
-		m.startSelectedProject()
+		return m.startSelectedProject()
 	default:
 		m.stopSelectedProject()
+		return nil
 	}
 }
 
