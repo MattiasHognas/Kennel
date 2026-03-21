@@ -139,20 +139,21 @@ func (m *Model) completeSelectedAgent() {
 	m.refreshProjectAndSelection(m.selectedProjectIndex())
 }
 
-func (m *Model) cycleSelectedProjectState() {
+func (m *Model) cycleSelectedProjectState() tea.Cmd {
 	project := m.selectedProject()
 	if project == nil {
-		return
+		return nil
 	}
 	if project.State.State == agent.Completed {
-		return
+		return nil
 	}
 
 	switch project.State.State {
 	case agent.Stopped:
-		m.startSelectedProject()
+		return m.startSelectedProject()
 	default:
 		m.stopSelectedProject()
+		return nil
 	}
 }
 

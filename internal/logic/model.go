@@ -520,10 +520,10 @@ func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bo
 	case key.Matches(msg, m.keymap.toggleProject):
 		if m.focusIndex == 1 {
 			m.cycleSelectedAgentState()
+			return false, true, nil
 		} else {
-			m.cycleSelectedProjectState()
+			return false, true, m.cycleSelectedProjectState()
 		}
-		return false, true, nil
 	default:
 		return false, false, nil
 	}
