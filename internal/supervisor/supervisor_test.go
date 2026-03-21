@@ -41,6 +41,7 @@ func TestRunPlanAddsMissingAgentsAndPersistsPlannerResult(t *testing.T) {
 	project := newTestProject(t, repo)
 	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
 	eb := eventbus.NewEventBus()
+	syncCh := eb.Subscribe(eventbus.SupervisorTopic)
 	tracking := &trackingRepo{SQLiteRepository: repo}
 	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
@@ -73,12 +74,19 @@ func TestRunPlanAddsMissingAgentsAndPersistsPlannerResult(t *testing.T) {
 	assertAgentState(t, stored.Agents, "planner", "completed", `{"streams":[[{"agent":"frontend-developer","task":"Build UI"}]]}`)
 	assertAgentState(t, stored.Agents, "branch-setup", "completed", "branch ready")
 	assertAgentState(t, stored.Agents, "frontend-developer", "completed", "frontend done")
+	assertActivityContains(t, stored.Activities, "planner: completed")
+	assertActivityContains(t, stored.Activities, "frontend-developer: completed")
 
 	if strings.Join(topics, ",") != "planner,branch-setup,frontend-developer" {
 		t.Fatalf("ACP topics = %v, want planner, branch-setup, frontend-developer", topics)
 	}
 	if len(tracking.checkpoints) == 0 {
 		t.Fatal("expected supervisor checkpoints to be recorded")
+	}
+	select {
+	case <-syncCh:
+	default:
+		t.Fatal("expected supervisor sync events to be published")
 	}
 }
 
@@ -179,8 +187,11 @@ func TestRunPlanRejectsUnknownAgentBeforeExecution(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("ReadProject returned error: %v", readErr)
 	}
-	if len(stored.Agents) != 0 {
-		t.Fatalf("agent count = %d, want 0 after invalid plan", len(stored.Agents))
+	if len(stored.Agents) != 1 {
+		t.Fatalf("agent count = %d, want 1 planner after invalid plan", len(stored.Agents))
+	}
+	if stored.Agents[0].Name != "planner" {
+		t.Fatalf("persisted agent = %q, want planner", stored.Agents[0].Name)
 	}
 	if len(tracking.checkpoints) == 0 || tracking.checkpoints[len(tracking.checkpoints)-1] != "planning_validation_failed" {
 		t.Fatalf("checkpoint statuses = %v, want planning_validation_failed", tracking.checkpoints)
@@ -252,4 +263,16 @@ func assertAgentState(t *testing.T, agents []repository.Agent, name, state, outp
 	}
 
 	t.Fatalf("agent %q not found in project", name)
+}
+
+func assertActivityContains(t *testing.T, activities []repository.Activity, want string) {
+	t.Helper()
+
+	for _, activity := range activities {
+		if activity.Text == want {
+			return
+		}
+	}
+
+	t.Fatalf("activity %q not found in %#v", want, activities)
 }

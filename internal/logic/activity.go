@@ -8,6 +8,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+const supervisorPollInterval = 100 * time.Millisecond
+
 func waitForActivity(source ActivitySource) tea.Cmd {
 	return func() tea.Msg {
 		event, ok := <-source.channel
@@ -65,4 +67,18 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 	m.persistActivity(project, source.agentIndex, activityText)
 
 	m.refreshProjectAndSelection(source.projectIndex)
+}
+
+func waitForSupervisorUpdate(source supervisorSource) tea.Cmd {
+	return tea.Tick(supervisorPollInterval, func(time.Time) tea.Msg {
+		select {
+		case _, ok := <-source.channel:
+			if !ok {
+				return nil
+			}
+			return supervisorSyncMsg{source: source}
+		default:
+			return supervisorPollMsg{source: source}
+		}
+	})
 }

@@ -2,8 +2,10 @@ package model
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
+	eventbus "MattiasHognas/Kennel/internal/events"
 	"MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
 )
@@ -65,5 +67,61 @@ func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 	}
 	if m.projects[0].State.State != agent.Stopped {
 		t.Fatalf("model project state = %s, want %s", m.projects[0].State.State, agent.Stopped)
+	}
+}
+
+func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
+	repo := newTestRepository(t)
+	storedProject, err := repo.CreateProject(context.Background(), "Sync Project", `C:\src\sync-project`, "first line\nsecond line")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
+		Config: ProjectConfig{
+			ProjectID: storedProject.ID,
+			Name:      storedProject.Name,
+		},
+		State: ProjectState{
+			State: agent.Stopped,
+		},
+	}}, repo)
+	m.projectTable.SetCursor(1)
+
+	eb := eventbus.NewEventBus()
+	source := supervisorSource{projectIndex: 0, channel: eb.Subscribe(eventbus.SupervisorTopic)}
+	m.projects[0].Runtime.SupervisorEvents = source.channel
+
+	agentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "planner")
+	if err != nil {
+		t.Fatalf("add agent: %v", err)
+	}
+	if err := repo.UpdateAgentState(context.Background(), agentRecord.ID, agent.Completed.String()); err != nil {
+		t.Fatalf("update agent state: %v", err)
+	}
+	if _, err := repo.NewActivity(context.Background(), storedProject.ID, sql.NullInt64{Int64: agentRecord.ID, Valid: true}, "planner: completed"); err != nil {
+		t.Fatalf("new activity: %v", err)
+	}
+
+	updatedModel, cmd := m.Update(supervisorSyncMsg{source: source})
+	if cmd == nil {
+		t.Fatal("expected supervisor polling command")
+	}
+	updated, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+	}
+
+	if len(updated.projects[0].Runtime.Agents) != 1 {
+		t.Fatalf("agent count = %d, want 1", len(updated.projects[0].Runtime.Agents))
+	}
+	if updated.projects[0].Runtime.Agents[0].Name() != "planner" {
+		t.Fatalf("agent name = %q, want planner", updated.projects[0].Runtime.Agents[0].Name())
+	}
+	if updated.projects[0].Runtime.Agents[0].State() != agent.Completed {
+		t.Fatalf("agent state = %s, want %s", updated.projects[0].Runtime.Agents[0].State(), agent.Completed)
+	}
+	if len(updated.projects[0].Runtime.Activities) != 1 || updated.projects[0].Runtime.Activities[0].Text != "planner: completed" {
+		t.Fatalf("activities = %#v, want planner completion", updated.projects[0].Runtime.Activities)
 	}
 }

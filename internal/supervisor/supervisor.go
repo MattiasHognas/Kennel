@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -37,6 +38,7 @@ const (
 type Repository interface {
 	AddAgentToProject(ctx context.Context, projectID int64, name string) (repository.Agent, error)
 	CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error
+	NewActivity(ctx context.Context, projectID int64, agentID sql.NullInt64, text string) (repository.Activity, error)
 	ReadProject(ctx context.Context, projectID int64) (repository.Project, error)
 	UpdateAgentOutput(ctx context.Context, agentID int64, output string) error
 	UpdateAgentState(ctx context.Context, agentID int64, state string) error
@@ -108,8 +110,22 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 
 	var planOutput string
 	plannerRec, plannerFound := agentStateMap[plannerTask.Agent]
+	if !plannerFound {
+		plannerRec, err = s.Repo.AddAgentToProject(ctx, s.ProjectID, plannerTask.Agent)
+		if err != nil {
+			return s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("add agent %s: %w", plannerTask.Agent, err))
+		}
+		agentStateMap[plannerTask.Agent] = plannerRec
+		s.publishSync(plannerTask.Agent, plannerRec.State, "")
+	}
 
-	if !plannerFound || plannerRec.State != "completed" {
+	if plannerRec.State != "completed" {
+		if err := s.markAgentRunning(ctx, plannerRec, plannerTask.Task); err != nil {
+			return s.failStop(ctx, 0, "planning_failed", err)
+		}
+		plannerRec.State = "running"
+		agentStateMap[plannerTask.Agent] = plannerRec
+
 		plannerWrapper, err := s.AcpFactory(ctx, plannerDef.LaunchConfig.Binary, plannerDef.LaunchConfig.Args, s.EventBus, s.Workplace, "planner")
 		if err != nil {
 			return s.failStop(ctx, 0, "planning_launch_failed", err)
@@ -161,7 +177,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		return s.failStop(ctx, 0, "planning_validation_failed", err)
 	}
 
-	if !plannerFound || plannerRec.State != "completed" {
+	if plannerRec.State != "completed" {
 		if err := s.completeAgent(ctx, agentStateMap[plannerAgentName], planOutput); err != nil {
 			log.Printf("Failed to persist planner completion: %v", err)
 		} else {
@@ -182,6 +198,12 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 	}
 
 	if branchSetupRec.State != "completed" {
+		if err := s.markAgentRunning(ctx, branchSetupRec, branchSetupTask.Task); err != nil {
+			return s.failStop(ctx, 1, "execution_failed", err)
+		}
+		branchSetupRec.State = "running"
+		agentStateMap[branchSetupTask.Agent] = branchSetupRec
+
 		setupWrapper, err := s.AcpFactory(ctx, branchSetupDef.LaunchConfig.Binary, branchSetupDef.LaunchConfig.Args, s.EventBus, s.Workplace, branchSetupTask.Agent)
 		if err != nil {
 			return s.failStop(ctx, 1, "launch_failed", err)
@@ -234,6 +256,12 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 					continue
 				}
 
+				if err := s.markAgentRunning(gCtx, agentRec, step.Task); err != nil {
+					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
+				}
+				agentRec.State = "running"
+				agentStateMap[step.Agent] = agentRec
+
 				wrapper, err := s.AcpFactory(gCtx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, s.Workplace, step.Agent)
 				if err != nil {
 					return fmt.Errorf("launch_failed for %s: %w", step.Agent, err)
@@ -249,10 +277,13 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 				wrapper.Close()
 				currentPrompt = out
 
-				if outErr := s.Repo.UpdateAgentOutput(gCtx, agentRec.ID, currentPrompt); outErr != nil {
-					log.Printf("Failed to checkpoint agent output: %v", outErr)
+				if err := s.completeAgent(gCtx, agentRec, currentPrompt); err != nil {
+					log.Printf("Failed to persist agent completion: %v", err)
+				} else {
+					agentRec.Output = currentPrompt
+					agentRec.State = "completed"
+					agentStateMap[step.Agent] = agentRec
 				}
-				s.Repo.UpdateAgentState(gCtx, agentRec.ID, "completed")
 
 				if saveErr := s.Repo.CheckpointSupervisorRun(gCtx, s.ProjectID, 2+streamIdx*100+stepIdx, "completed", out); saveErr != nil {
 					return saveErr
@@ -390,6 +421,7 @@ func (s *Supervisor) ensurePlanAgents(ctx context.Context, plan Plan, agentMap m
 			return fmt.Errorf("add agent %s: %w", agentName, err)
 		}
 		agentStateMap[agentName] = agentRec
+		s.publishSync(agentName, agentRec.State, "")
 	}
 
 	return nil
@@ -422,8 +454,44 @@ func (s *Supervisor) completeAgent(ctx context.Context, agent repository.Agent, 
 	if err := s.Repo.UpdateAgentState(ctx, agent.ID, "completed"); err != nil {
 		return err
 	}
+	s.recordAgentActivity(ctx, agent, "completed")
+	s.publishSync(agent.Name, "completed", "completed")
 
 	return nil
+}
+
+func (s *Supervisor) markAgentRunning(ctx context.Context, agent repository.Agent, activity string) error {
+	if err := s.Repo.UpdateAgentState(ctx, agent.ID, "running"); err != nil {
+		return err
+	}
+	s.recordAgentActivity(ctx, agent, activity)
+	s.publishSync(agent.Name, "running", activity)
+
+	return nil
+}
+
+func (s *Supervisor) recordAgentActivity(ctx context.Context, agent repository.Agent, activity string) {
+	activity = strings.TrimSpace(activity)
+	if s.Repo == nil || activity == "" {
+		return
+	}
+
+	if _, err := s.Repo.NewActivity(ctx, s.ProjectID, sql.NullInt64{Int64: agent.ID, Valid: agent.ID > 0}, fmt.Sprintf("%s: %s", agent.Name, activity)); err != nil {
+		log.Printf("Failed to persist activity: %v", err)
+	}
+}
+
+func (s *Supervisor) publishSync(agentName, state, activity string) {
+	if s.EventBus == nil {
+		return
+	}
+
+	s.EventBus.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.SupervisorSyncEvent{
+		ProjectID: s.ProjectID,
+		Agent:     agentName,
+		State:     state,
+		Activity:  activity,
+	}})
 }
 
 func (s *Supervisor) failStop(ctx context.Context, stepIndex int, status string, originalErr error) error {
