@@ -8,7 +8,7 @@ import (
 	agent "MattiasHognas/Kennel/internal/workers"
 )
 
-const agentsDir = "C:\\source\\Kennel"
+const agentsDir = "C:\\source\\Kennel\\"
 
 func (m *Model) startSelectedProject() {
 	projectIndex := m.selectedProjectIndex()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strings"
 
 	"MattiasHognas/Kennel/internal/acp"
@@ -27,7 +28,14 @@ type Plan struct {
 	Streams []TaskStream `json:"streams"`
 }
 
+const (
+	branchSetupAgentName    = "branch-setup"
+	plannerAgentName        = "planner"
+	generalPurposeAgentName = "general-purpose"
+)
+
 type Repository interface {
+	AddAgentToProject(ctx context.Context, projectID int64, name string) (repository.Agent, error)
 	CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error
 	ReadProject(ctx context.Context, projectID int64) (repository.Project, error)
 	UpdateAgentOutput(ctx context.Context, agentID int64, output string) error
@@ -88,19 +96,20 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 		agentMap[d.Name] = d
 	}
 
-	plannerDef, ok := agentMap["planner"]
+	registerBuiltinAgents(agentMap)
+
+	planningAgents := availablePlanningAgents(agentMap, configuredAgents)
+
+	plannerTask := PlanTask{Agent: plannerAgentName, Task: "Create an execution plan based on the project instructions."}
+	plannerDef, ok := agentMap[plannerTask.Agent]
 	if !ok {
-		plannerDef = discovery.AgentDefinition{
-			Name:         "planner",
-			LaunchConfig: discovery.LaunchConfig{Binary: "copilot", Args: []string{"--acp"}},
-		}
+		return s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("planner agent definition missing"))
 	}
 
 	var planOutput string
-	plannerRec, foundPlanner := agentStateMap["planner"]
-	if foundPlanner && plannerRec.State == "completed" {
-		planOutput = plannerRec.Output
-	} else {
+	plannerRec, plannerFound := agentStateMap[plannerTask.Agent]
+
+	if !plannerFound || plannerRec.State != "completed" {
 		plannerWrapper, err := s.AcpFactory(ctx, plannerDef.LaunchConfig.Binary, plannerDef.LaunchConfig.Args, s.EventBus, s.Workplace, "planner")
 		if err != nil {
 			return s.failStop(ctx, 0, "planning_launch_failed", err)
@@ -111,20 +120,16 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 
 You must output a JSON object containing an array of 'streams', where each stream is an array of tasks that must run sequentially.
 Each task must have an 'agent' and a 'task' string. Allow parallel streams.
-Available or configured agents: %v
-Ensure the response is purely the JSON or embedded in a Markdown block.`, instructions, configuredAgents)
+Use only these exact agent names for plan tasks: %v
+Do not use planner, branch-setup, supervisor, or general_purpose unless they appear exactly in the allowed list.
+		Ensure the response is purely the JSON or embedded in a Markdown block.`, instructions, planningAgents)
 
 		planOutput, err = plannerWrapper.Prompt(ctx, planPrompt)
 		if err != nil {
 			return s.failStop(ctx, 0, "planning_failed", err)
 		}
-
-		if foundPlanner {
-			if outErr := s.Repo.UpdateAgentOutput(ctx, plannerRec.ID, planOutput); outErr != nil {
-				log.Printf("Failed to checkpoint planner output: %v", outErr)
-			}
-			s.Repo.UpdateAgentState(ctx, plannerRec.ID, "completed")
-		}
+	} else {
+		planOutput = plannerRec.Output
 	}
 
 	rawJSON := planOutput
@@ -144,20 +149,40 @@ Ensure the response is purely the JSON or embedded in a Markdown block.`, instru
 		return s.failStop(ctx, 0, "planning_json_parse_failed", err)
 	}
 
-	branchSetupTask := PlanTask{Agent: "branch-setup", Task: "Initialize branch context based on plan."}
-	setupDef, ok := agentMap[branchSetupTask.Agent]
-	if !ok {
-		return s.failStop(ctx, 1, "agent_not_found", fmt.Errorf("agent %s not found", branchSetupTask.Agent))
+	if err := normalizePlan(&plan); err != nil {
+		return s.failStop(ctx, 0, "planning_validation_failed", err)
 	}
 
+	if err := resolvePlanAgents(&plan, agentMap); err != nil {
+		return s.failStop(ctx, 0, "planning_validation_failed", err)
+	}
+
+	if err := s.ensurePlanAgents(ctx, plan, agentMap, agentStateMap); err != nil {
+		return s.failStop(ctx, 0, "planning_validation_failed", err)
+	}
+
+	if !plannerFound || plannerRec.State != "completed" {
+		if err := s.completeAgent(ctx, agentStateMap[plannerAgentName], planOutput); err != nil {
+			log.Printf("Failed to persist planner completion: %v", err)
+		} else {
+			plannerRec = agentStateMap[plannerAgentName]
+			plannerRec.Output = planOutput
+			plannerRec.State = "completed"
+			agentStateMap[plannerAgentName] = plannerRec
+		}
+	}
+
+	branchSetupTask := PlanTask{Agent: branchSetupAgentName, Task: "Initialize branch context based on plan."}
+	branchSetupDef := agentMap[branchSetupTask.Agent]
+
 	var setupOut string
-	agentRec, found := agentStateMap[branchSetupTask.Agent]
-	if !found {
+	branchSetupRec, branchSetupFound := agentStateMap[branchSetupTask.Agent]
+	if !branchSetupFound {
 		return s.failStop(ctx, 1, "agent_state_not_found", fmt.Errorf("agent state for %s not found", branchSetupTask.Agent))
 	}
 
-	if agentRec.State != "completed" {
-		setupWrapper, err := s.AcpFactory(ctx, setupDef.LaunchConfig.Binary, setupDef.LaunchConfig.Args, s.EventBus, s.Workplace, branchSetupTask.Agent)
+	if branchSetupRec.State != "completed" {
+		setupWrapper, err := s.AcpFactory(ctx, branchSetupDef.LaunchConfig.Binary, branchSetupDef.LaunchConfig.Args, s.EventBus, s.Workplace, branchSetupTask.Agent)
 		if err != nil {
 			return s.failStop(ctx, 1, "launch_failed", err)
 		}
@@ -168,12 +193,16 @@ Ensure the response is purely the JSON or embedded in a Markdown block.`, instru
 			return s.failStop(ctx, 1, "execution_failed", err)
 		}
 
-		if outErr := s.Repo.UpdateAgentOutput(ctx, agentRec.ID, setupOut); outErr != nil {
-			log.Printf("Failed to checkpoint agent output: %v", outErr)
+		if err := s.completeAgent(ctx, agentStateMap[branchSetupAgentName], setupOut); err != nil {
+			log.Printf("Failed to persist branch setup completion: %v", err)
+		} else {
+			branchSetupRec = agentStateMap[branchSetupAgentName]
+			branchSetupRec.Output = setupOut
+			branchSetupRec.State = "completed"
+			agentStateMap[branchSetupAgentName] = branchSetupRec
 		}
-		s.Repo.UpdateAgentState(ctx, agentRec.ID, "completed")
 	} else {
-		setupOut = agentRec.Output
+		setupOut = branchSetupRec.Output
 	}
 
 	if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, 1, "completed", setupOut); saveErr != nil {
@@ -235,6 +264,163 @@ Ensure the response is purely the JSON or embedded in a Markdown block.`, instru
 
 	if err := g.Wait(); err != nil {
 		return s.failStop(ctx, -1, "stream_execution_failed", err)
+	}
+
+	return nil
+}
+
+func normalizePlan(plan *Plan) error {
+	for streamIdx := range plan.Streams {
+		for taskIdx := range plan.Streams[streamIdx] {
+			plan.Streams[streamIdx][taskIdx].Agent = strings.TrimSpace(plan.Streams[streamIdx][taskIdx].Agent)
+			plan.Streams[streamIdx][taskIdx].Task = strings.TrimSpace(plan.Streams[streamIdx][taskIdx].Task)
+
+			if plan.Streams[streamIdx][taskIdx].Agent == "" {
+				return fmt.Errorf("plan stream %d task %d has empty agent", streamIdx, taskIdx)
+			}
+			if plan.Streams[streamIdx][taskIdx].Task == "" {
+				return fmt.Errorf("plan stream %d task %d has empty task", streamIdx, taskIdx)
+			}
+		}
+	}
+
+	return nil
+}
+
+func resolvePlanAgents(plan *Plan, agentMap map[string]discovery.AgentDefinition) error {
+	aliases := make(map[string]string, len(agentMap))
+	for name := range agentMap {
+		canonicalName := canonicalAgentName(name)
+		if canonicalName == "" {
+			continue
+		}
+		if existing, found := aliases[canonicalName]; found && existing != name {
+			return fmt.Errorf("agent name alias conflict between %s and %s", existing, name)
+		}
+		aliases[canonicalName] = name
+	}
+
+	for streamIdx := range plan.Streams {
+		for taskIdx := range plan.Streams[streamIdx] {
+			resolvedName, ok := aliases[canonicalAgentName(plan.Streams[streamIdx][taskIdx].Agent)]
+			if !ok {
+				return fmt.Errorf("agent %s not found", plan.Streams[streamIdx][taskIdx].Agent)
+			}
+			plan.Streams[streamIdx][taskIdx].Agent = resolvedName
+		}
+	}
+
+	return nil
+}
+
+func canonicalAgentName(name string) string {
+	replacer := strings.NewReplacer("-", " ", "_", " ")
+	parts := strings.Fields(replacer.Replace(strings.ToLower(strings.TrimSpace(name))))
+	return strings.Join(parts, "-")
+}
+
+func registerBuiltinAgents(agentMap map[string]discovery.AgentDefinition) {
+	if _, ok := agentMap[plannerAgentName]; !ok {
+		agentMap[plannerAgentName] = builtinAgentDefinition(plannerAgentName)
+	}
+	if _, ok := agentMap[generalPurposeAgentName]; !ok {
+		agentMap[generalPurposeAgentName] = builtinAgentDefinition(generalPurposeAgentName)
+	}
+}
+
+func builtinAgentDefinition(name string) discovery.AgentDefinition {
+	return discovery.AgentDefinition{
+		Name:         name,
+		LaunchConfig: discovery.LaunchConfig{Binary: "copilot", Args: []string{"--acp"}},
+	}
+}
+
+func availablePlanningAgents(agentMap map[string]discovery.AgentDefinition, configuredAgents []string) []string {
+	selected := make([]string, 0, len(agentMap))
+	seen := make(map[string]struct{}, len(agentMap))
+
+	add := func(name string) {
+		if name == "" || name == plannerAgentName || name == branchSetupAgentName || name == generalPurposeAgentName {
+			return
+		}
+		if _, ok := agentMap[name]; !ok {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		selected = append(selected, name)
+	}
+
+	for _, name := range configuredAgents {
+		canonicalName := canonicalAgentName(name)
+		for agentName := range agentMap {
+			if canonicalAgentName(agentName) == canonicalName {
+				add(agentName)
+				break
+			}
+		}
+	}
+
+	for name := range agentMap {
+		add(name)
+	}
+
+	sort.Strings(selected)
+	return selected
+}
+
+func (s *Supervisor) ensurePlanAgents(ctx context.Context, plan Plan, agentMap map[string]discovery.AgentDefinition, agentStateMap map[string]repository.Agent) error {
+	requiredAgents := collectRequiredAgents(plan)
+
+	for _, agentName := range requiredAgents {
+		if _, ok := agentMap[agentName]; !ok {
+			return fmt.Errorf("agent %s not found", agentName)
+		}
+	}
+
+	for _, agentName := range requiredAgents {
+		if _, found := agentStateMap[agentName]; found {
+			continue
+		}
+
+		agentRec, err := s.Repo.AddAgentToProject(ctx, s.ProjectID, agentName)
+		if err != nil {
+			return fmt.Errorf("add agent %s: %w", agentName, err)
+		}
+		agentStateMap[agentName] = agentRec
+	}
+
+	return nil
+}
+
+func collectRequiredAgents(plan Plan) []string {
+	requiredAgents := []string{"planner", "branch-setup"}
+	seen := map[string]struct{}{
+		plannerAgentName:     {},
+		branchSetupAgentName: {},
+	}
+
+	for _, stream := range plan.Streams {
+		for _, task := range stream {
+			if _, ok := seen[task.Agent]; ok {
+				continue
+			}
+			seen[task.Agent] = struct{}{}
+			requiredAgents = append(requiredAgents, task.Agent)
+		}
+	}
+
+	return requiredAgents
+}
+
+func (s *Supervisor) completeAgent(ctx context.Context, agent repository.Agent, output string) error {
+	if err := s.Repo.UpdateAgentOutput(ctx, agent.ID, output); err != nil {
+		return err
+	}
+	if err := s.Repo.UpdateAgentState(ctx, agent.ID, "completed"); err != nil {
+		return err
 	}
 
 	return nil
