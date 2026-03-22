@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	repository "MattiasHognas/Kennel/internal/data"
@@ -28,10 +29,13 @@ func (c *stubACPClient) Close() error { return nil }
 
 type trackingRepo struct {
 	*repository.SQLiteRepository
+	mu          sync.Mutex
 	checkpoints []string
 }
 
 func (r *trackingRepo) CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.checkpoints = append(r.checkpoints, status)
 	return nil
 }

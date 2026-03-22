@@ -157,9 +157,12 @@ func FormatPrompt(msg string, activities []string) string {
 }
 
 type terminalState struct {
-	cmd *exec.Cmd
-	mu  sync.Mutex
-	buf strings.Builder
+	cmd      *exec.Cmd
+	mu       sync.Mutex
+	buf      strings.Builder
+	done     chan struct{}
+	waitErr  error
+	exitCode *int
 }
 
 func (t *terminalState) Write(p []byte) (n int, err error) {
@@ -174,6 +177,24 @@ func (t *terminalState) ReadAndClear() string {
 	res := t.buf.String()
 	t.buf.Reset()
 	return res
+}
+
+func (t *terminalState) recordExit(waitErr error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.waitErr = waitErr
+	if t.cmd != nil && t.cmd.ProcessState != nil {
+		exitCode := t.cmd.ProcessState.ExitCode()
+		t.exitCode = &exitCode
+	}
+	close(t.done)
+}
+
+func (t *terminalState) exitResult() (*int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.exitCode, t.waitErr
 }
 
 type localClient struct {
@@ -205,19 +226,73 @@ func (c *localClient) SessionUpdate(ctx context.Context, params acp.SessionNotif
 	return nil
 }
 
-func (c *localClient) checkInWorkplace(targetPath string) error {
-	absTarget, err := filepath.Abs(targetPath)
-	if err != nil {
-		return err
-	}
+func (c *localClient) checkInWorkplace(targetPath string) (string, error) {
 	absWorkplace, err := filepath.Abs(c.workplace)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !strings.HasPrefix(filepath.Clean(absTarget)+string(filepath.Separator), filepath.Clean(absWorkplace)+string(filepath.Separator)) {
-		return fmt.Errorf("path is outside of workspace")
+	resolvedWorkplace, err := filepath.EvalSymlinks(absWorkplace)
+	if err != nil {
+		return "", err
 	}
-	return nil
+
+	resolvedTarget := targetPath
+	if !filepath.IsAbs(resolvedTarget) {
+		resolvedTarget = filepath.Join(resolvedWorkplace, resolvedTarget)
+	}
+	resolvedTarget, err = filepath.Abs(resolvedTarget)
+	if err != nil {
+		return "", err
+	}
+
+	if evalTarget, evalErr := filepath.EvalSymlinks(resolvedTarget); evalErr == nil {
+		resolvedTarget = evalTarget
+	} else if !os.IsNotExist(evalErr) {
+		return "", evalErr
+	} else {
+		// Target (or some parent) does not exist. Walk up to the deepest existing
+		// ancestor directory, resolve its symlinks, and then reconstruct the full path.
+		originalTarget := resolvedTarget
+		dir := filepath.Dir(originalTarget)
+
+		var (
+			resolvedAncestor string
+			ancestorErr      error
+		)
+
+		for {
+			resolvedAncestor, ancestorErr = filepath.EvalSymlinks(dir)
+			if ancestorErr == nil {
+				break
+			}
+			if !os.IsNotExist(ancestorErr) {
+				return "", ancestorErr
+			}
+			nextDir := filepath.Dir(dir)
+			if nextDir == dir {
+				// Reached filesystem root without finding an existing ancestor.
+				return "", ancestorErr
+			}
+			dir = nextDir
+		}
+
+		remaining, relErr := filepath.Rel(dir, originalTarget)
+		if relErr != nil {
+			return "", relErr
+		}
+
+		resolvedTarget = filepath.Join(resolvedAncestor, remaining)
+	}
+
+	relPath, err := filepath.Rel(resolvedWorkplace, resolvedTarget)
+	if err != nil {
+		return "", err
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path is outside of workspace")
+	}
+
+	return resolvedTarget, nil
 }
 
 func (c *localClient) ReadTextFile(ctx context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
@@ -225,10 +300,11 @@ func (c *localClient) ReadTextFile(ctx context.Context, params acp.ReadTextFileR
 	if err != nil {
 		return acp.ReadTextFileResponse{}, fmt.Errorf("validation failed: %w", err)
 	}
-	if err := c.checkInWorkplace(params.Path); err != nil {
+	resolvedPath, err := c.checkInWorkplace(params.Path)
+	if err != nil {
 		return acp.ReadTextFileResponse{}, fmt.Errorf("access denied: %w", err)
 	}
-	content, err := os.ReadFile(params.Path)
+	content, err := os.ReadFile(resolvedPath)
 	if err != nil {
 		return acp.ReadTextFileResponse{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -240,10 +316,11 @@ func (c *localClient) WriteTextFile(ctx context.Context, params acp.WriteTextFil
 	if err != nil {
 		return acp.WriteTextFileResponse{}, fmt.Errorf("validation failed: %w", err)
 	}
-	if err := c.checkInWorkplace(params.Path); err != nil {
+	resolvedPath, err := c.checkInWorkplace(params.Path)
+	if err != nil {
 		return acp.WriteTextFileResponse{}, fmt.Errorf("access denied: %w", err)
 	}
-	err = os.WriteFile(params.Path, []byte(params.Content), 0644)
+	err = os.WriteFile(resolvedPath, []byte(params.Content), 0644)
 	if err != nil {
 		return acp.WriteTextFileResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
@@ -262,8 +339,8 @@ func (c *localClient) RequestPermission(ctx context.Context, params acp.RequestP
 			break
 		}
 	}
-	if permissionOption == nil && len(params.Options) > 0 {
-		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, fmt.Errorf("no allow once permission option found")
+	if permissionOption == nil {
+		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 	}
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(permissionOption.OptionId)}, nil
 }
@@ -275,7 +352,7 @@ func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTermi
 	}
 	terminalCmd := exec.Command(params.Command, params.Args...)
 	terminalCmd.Dir = c.workplace
-	state := &terminalState{cmd: terminalCmd}
+	state := &terminalState{cmd: terminalCmd, done: make(chan struct{})}
 	terminalCmd.Stdout = state
 	terminalCmd.Stderr = state
 	err = terminalCmd.Start()
@@ -287,7 +364,7 @@ func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTermi
 	c.terminals[termID] = state
 	c.terminalsMu.Unlock()
 	go func() {
-		_ = terminalCmd.Wait()
+		state.recordExit(terminalCmd.Wait())
 	}()
 	return acp.CreateTerminalResponse{TerminalId: termID}, nil
 }
@@ -333,13 +410,13 @@ func (c *localClient) ReleaseTerminal(ctx context.Context, params acp.ReleaseTer
 		return acp.ReleaseTerminalResponse{}, fmt.Errorf("validation failed: %w", err)
 	}
 	c.terminalsMu.Lock()
-	state, exists := c.terminals[params.TerminalId]
+	_, exists := c.terminals[params.TerminalId]
+	if exists {
+		delete(c.terminals, params.TerminalId)
+	}
 	c.terminalsMu.Unlock()
 	if !exists {
 		return acp.ReleaseTerminalResponse{}, fmt.Errorf("invalid terminal ID")
-	}
-	if state.cmd.Process != nil {
-		_ = state.cmd.Process.Release()
 	}
 	return acp.ReleaseTerminalResponse{}, nil
 }
@@ -355,11 +432,17 @@ func (c *localClient) WaitForTerminalExit(ctx context.Context, params acp.WaitFo
 	if !exists {
 		return acp.WaitForTerminalExitResponse{}, fmt.Errorf("invalid terminal ID")
 	}
-	if state.cmd.Process != nil {
-		_ = state.cmd.Wait()
-		if state.cmd.ProcessState != nil {
-			exitCode := state.cmd.ProcessState.ExitCode()
-			return acp.WaitForTerminalExitResponse{ExitCode: &exitCode}, nil
+
+	select {
+	case <-ctx.Done():
+		return acp.WaitForTerminalExitResponse{}, ctx.Err()
+	case <-state.done:
+		exitCode, waitErr := state.exitResult()
+		if exitCode != nil {
+			return acp.WaitForTerminalExitResponse{ExitCode: exitCode}, nil
+		}
+		if waitErr != nil {
+			return acp.WaitForTerminalExitResponse{}, waitErr
 		}
 	}
 	return acp.WaitForTerminalExitResponse{}, nil
