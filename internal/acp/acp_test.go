@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,6 +60,9 @@ func TestReadTextFileRejectsSymlinkEscape(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 	if err := os.Symlink(outside, linkedDir); err != nil {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, errors.ErrUnsupported) {
+			t.Skipf("symlink creation unsupported in this environment: %v", err)
+		}
 		t.Fatalf("Symlink returned error: %v", err)
 	}
 
