@@ -95,6 +95,11 @@ func (m *Model) completeSelectedProject() {
 		project.Runtime.CancelCtx = nil
 		project.Runtime.SupervisorDone = nil
 	}
+	if project.Runtime.ActivityCancel != nil {
+		project.Runtime.ActivityCancel()
+		project.Runtime.ActivityCancel = nil
+		project.Runtime.ActivityDone = nil
+	}
 	if project.Runtime.Supervisor != nil {
 		if project.Runtime.SupervisorEvents != nil {
 			project.Runtime.Supervisor.EventBus.Unsubscribe(eventbus.SupervisorTopic, project.Runtime.SupervisorEvents)
