@@ -135,4 +135,30 @@ func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
 	if len(updated.projects[0].Runtime.Activities) != 1 || updated.projects[0].Runtime.Activities[0].Text != "planner: completed" {
 		t.Fatalf("activities = %#v, want planner completion", updated.projects[0].Runtime.Activities)
 	}
+	if len(updated.Sources) != 1 {
+		t.Fatalf("activity source count = %d, want 1", len(updated.Sources))
+	}
+	if updated.Sources[0].channel != updated.projects[0].Runtime.Agents[0].SubscribeActivity() {
+		t.Fatal("activity source was not rebuilt for refreshed agent")
+	}
+
+	updated.projects[0].Runtime.Agents[0].Complete()
+	activity := waitForActivity(updated.Sources[0])()
+	if activity == nil {
+		t.Fatal("expected activity message from refreshed agent source")
+	}
+}
+
+func TestWaitForSupervisorUpdateStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	msg := waitForSupervisorUpdate(supervisorSource{
+		projectIndex: 0,
+		channel:      make(chan eventbus.Event),
+		done:         ctx.Done(),
+	})()
+	if msg != nil {
+		t.Fatalf("message = %#v, want nil", msg)
+	}
 }

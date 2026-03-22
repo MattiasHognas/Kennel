@@ -40,8 +40,11 @@ type ProjectRuntime struct {
 	Agents           []agent.AgentContract
 	AgentIDs         []int64
 	Activities       []ActivityEntry
+	ActivityDone     <-chan struct{}
+	ActivityCancel   context.CancelFunc
 	Supervisor       *supervisor.Supervisor
 	SupervisorEvents eventbus.EventChan
+	SupervisorDone   <-chan struct{}
 	CancelCtx        context.CancelFunc
 }
 
@@ -62,6 +65,7 @@ type ActivitySource struct {
 	projectIndex int
 	agentIndex   int
 	channel      eventbus.EventChan
+	done         <-chan struct{}
 }
 
 type activityMsg struct {
@@ -72,6 +76,7 @@ type activityMsg struct {
 type supervisorSource struct {
 	projectIndex int
 	channel      eventbus.EventChan
+	done         <-chan struct{}
 }
 
 type supervisorSyncMsg struct {
@@ -158,6 +163,7 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 		},
 	}
 
+	m.initializeActivityListeners()
 	m.Sources = m.BuildActivitySources()
 	m.refreshProjectTable()
 	m.refreshSelectedProjectTables()
@@ -235,8 +241,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, waitForSupervisorUpdate(msg.source)
 			}
 		}
-		m.syncProjectFromRepository(msg.source.projectIndex)
-		return m, waitForSupervisorUpdate(msg.source)
+		activitySources := m.syncProjectFromRepository(msg.source.projectIndex)
+		cmds := make([]tea.Cmd, 0, len(activitySources)+1)
+		cmds = append(cmds, waitForSupervisorUpdate(msg.source))
+		for _, source := range activitySources {
+			cmds = append(cmds, waitForActivity(source))
+		}
+		return m, tea.Batch(cmds...)
 	}
 
 	if m.mode == projectEditorViewMode {
@@ -586,27 +597,32 @@ func (m *Model) shouldListenForSupervisor(source supervisorSource) bool {
 		return false
 	}
 
-	return m.projects[source.projectIndex].Runtime.SupervisorEvents == source.channel
+	project := m.projects[source.projectIndex]
+	return project.Runtime.SupervisorEvents == source.channel && project.Runtime.SupervisorDone == source.done
 }
 
-func (m *Model) syncProjectFromRepository(projectIndex int) {
+func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 	if m.repository == nil || projectIndex < 0 || projectIndex >= len(m.projects) {
-		return
+		return nil
 	}
 
 	project := &m.projects[projectIndex]
 	if project.Config.ProjectID <= 0 {
-		return
+		return nil
 	}
 
 	storedProject, err := m.repository.ReadProject(context.Background(), project.Config.ProjectID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sync project from repository: %v\n", err)
-		return
+		return nil
 	}
 
+	if project.Runtime.ActivityCancel != nil {
+		project.Runtime.ActivityCancel()
+	}
 	preservedSupervisor := project.Runtime.Supervisor
 	preservedSupervisorEvents := project.Runtime.SupervisorEvents
+	preservedSupervisorDone := project.Runtime.SupervisorDone
 	preservedCancel := project.Runtime.CancelCtx
 
 	agents := make([]agent.AgentContract, 0, len(storedProject.Agents))
@@ -634,10 +650,13 @@ func (m *Model) syncProjectFromRepository(projectIndex int) {
 		Activities:       activities,
 		Supervisor:       preservedSupervisor,
 		SupervisorEvents: preservedSupervisorEvents,
+		SupervisorDone:   preservedSupervisorDone,
 		CancelCtx:        preservedCancel,
 	}
+	sources := m.resetActivitySourcesForProject(projectIndex)
 
 	m.refreshProjectAndSelection(projectIndex)
+	return sources
 }
 
 func restorePersistedAgent(name string, persistedState string) agent.AgentContract {
@@ -654,6 +673,11 @@ func restorePersistedAgent(name string, persistedState string) agent.AgentContra
 func (m Model) Shutdown() {
 	for i := range m.projects {
 		project := &m.projects[i]
+		if project.Runtime.ActivityCancel != nil {
+			project.Runtime.ActivityCancel()
+			project.Runtime.ActivityCancel = nil
+			project.Runtime.ActivityDone = nil
+		}
 		for agentIndex, agentInstance := range project.Runtime.Agents {
 			if agentInstance.State() != agent.Running {
 				continue

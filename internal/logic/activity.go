@@ -2,6 +2,7 @@ package model
 
 import (
 	eventbus "MattiasHognas/Kennel/internal/events"
+	"context"
 	"fmt"
 	"time"
 
@@ -10,37 +11,43 @@ import (
 
 func waitForActivity(source ActivitySource) tea.Cmd {
 	return func() tea.Msg {
-		event, ok := <-source.channel
-		if !ok {
+		select {
+		case <-source.done:
 			return nil
+		case event, ok := <-source.channel:
+			if !ok {
+				return nil
+			}
+			var text string
+			switch p := event.Payload.(type) {
+			case eventbus.WorkerMessageEvent:
+				text = p.Chunk
+			case eventbus.WorkerCancellationEvent:
+				text = p.Reason
+			case eventbus.WorkerCompletionEvent:
+				text = p.Result
+			case eventbus.PlanUpdateEvent:
+				text = "Plan updated"
+			case string:
+				text = p
+			default:
+				text = fmt.Sprintf("%v", event.Payload)
+			}
+			return activityMsg{source: source, text: text}
 		}
-		var text string
-		switch p := event.Payload.(type) {
-		case eventbus.WorkerMessageEvent:
-			text = p.Chunk
-		case eventbus.WorkerCancellationEvent:
-			text = p.Reason
-		case eventbus.WorkerCompletionEvent:
-			text = p.Result
-		case eventbus.PlanUpdateEvent:
-			text = "Plan updated"
-		case string:
-			text = p
-		default:
-			text = fmt.Sprintf("%v", event.Payload)
-		}
-		return activityMsg{source: source, text: text}
 	}
 }
 
 func (m *Model) BuildActivitySources() []ActivitySource {
 	sources := make([]ActivitySource, 0)
 	for projectIndex := range m.projects {
+		m.ensureActivityListener(projectIndex)
 		for agentIndex, agentInstance := range m.projects[projectIndex].Runtime.Agents {
 			sources = append(sources, ActivitySource{
 				projectIndex: projectIndex,
 				agentIndex:   agentIndex,
 				channel:      agentInstance.SubscribeActivity(),
+				done:         m.projects[projectIndex].Runtime.ActivityDone,
 			})
 		}
 	}
@@ -58,8 +65,52 @@ func (m *Model) BuildSupervisorSources() []supervisorSource {
 		sources = append(sources, supervisorSource{
 			projectIndex: projectIndex,
 			channel:      channel,
+			done:         m.projects[projectIndex].Runtime.SupervisorDone,
 		})
 	}
+	return sources
+}
+
+func (m *Model) initializeActivityListeners() {
+	for projectIndex := range m.projects {
+		m.ensureActivityListener(projectIndex)
+	}
+}
+
+func (m *Model) ensureActivityListener(projectIndex int) {
+	if projectIndex < 0 || projectIndex >= len(m.projects) {
+		return
+	}
+
+	project := &m.projects[projectIndex]
+	if project.Runtime.ActivityDone != nil {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	project.Runtime.ActivityCancel = cancel
+	project.Runtime.ActivityDone = ctx.Done()
+}
+
+func (m *Model) resetActivitySourcesForProject(projectIndex int) []ActivitySource {
+	if projectIndex < 0 || projectIndex >= len(m.projects) {
+		return nil
+	}
+
+	project := &m.projects[projectIndex]
+	ctx, cancel := context.WithCancel(context.Background())
+	project.Runtime.ActivityCancel = cancel
+	project.Runtime.ActivityDone = ctx.Done()
+
+	m.Sources = m.BuildActivitySources()
+
+	sources := make([]ActivitySource, 0, len(project.Runtime.Agents))
+	for _, source := range m.Sources {
+		if source.projectIndex == projectIndex {
+			sources = append(sources, source)
+		}
+	}
+
 	return sources
 }
 
@@ -85,16 +136,20 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 
 func waitForSupervisorUpdate(source supervisorSource) tea.Cmd {
 	return func() tea.Msg {
-		event, ok := <-source.channel
-		if !ok {
+		select {
+		case <-source.done:
 			return nil
-		}
+		case event, ok := <-source.channel:
+			if !ok {
+				return nil
+			}
 
-		syncEvent, ok := event.Payload.(eventbus.SupervisorSyncEvent)
-		if !ok {
-			return supervisorSyncMsg{source: source}
-		}
+			syncEvent, ok := event.Payload.(eventbus.SupervisorSyncEvent)
+			if !ok {
+				return supervisorSyncMsg{source: source}
+			}
 
-		return supervisorSyncMsg{source: source, event: syncEvent}
+			return supervisorSyncMsg{source: source, event: syncEvent}
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"MattiasHognas/Kennel/internal/acp"
 	repository "MattiasHognas/Kennel/internal/data"
@@ -84,6 +85,7 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 	}
 
 	agentStateMap := make(map[string]repository.Agent)
+	var agentStateMu sync.RWMutex
 	for _, a := range proj.Agents {
 		agentStateMap[a.Name] = a
 	}
@@ -245,7 +247,9 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 					return fmt.Errorf("agent %s not found in stream %d", step.Agent, streamIdx)
 				}
 
+				agentStateMu.RLock()
 				agentRec, found := agentStateMap[step.Agent]
+				agentStateMu.RUnlock()
 
 				if !found {
 					return fmt.Errorf("agent %s not found in project state for stream %d", step.Agent, streamIdx)
@@ -260,7 +264,9 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
 				}
 				agentRec.State = "running"
+				agentStateMu.Lock()
 				agentStateMap[step.Agent] = agentRec
+				agentStateMu.Unlock()
 
 				wrapper, err := s.AcpFactory(gCtx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, s.Workplace, step.Agent)
 				if err != nil {
@@ -282,7 +288,9 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 				} else {
 					agentRec.Output = currentPrompt
 					agentRec.State = "completed"
+					agentStateMu.Lock()
 					agentStateMap[step.Agent] = agentRec
+					agentStateMu.Unlock()
 				}
 
 				if saveErr := s.Repo.CheckpointSupervisorRun(gCtx, s.ProjectID, 2+streamIdx*100+stepIdx, "completed", out); saveErr != nil {

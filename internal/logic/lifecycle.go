@@ -21,9 +21,10 @@ func (m *Model) startSelectedProject() tea.Cmd {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	project.Runtime.CancelCtx = cancel
+	project.Runtime.SupervisorDone = ctx.Done()
 
 	eb := eventbus.NewEventBus()
-	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic)}
+	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic), done: ctx.Done()}
 	sup := supervisor.NewSupervisor(m.repository, eb, agentsDir, project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
 	project.Runtime.Supervisor = sup
 	project.Runtime.SupervisorEvents = source.channel
@@ -55,6 +56,7 @@ func (m *Model) stopSelectedProject() {
 	if project.Runtime.CancelCtx != nil {
 		project.Runtime.CancelCtx()
 		project.Runtime.CancelCtx = nil
+		project.Runtime.SupervisorDone = nil
 	}
 	if project.Runtime.Supervisor != nil {
 		if project.Runtime.SupervisorEvents != nil {
@@ -85,6 +87,7 @@ func (m *Model) completeSelectedProject() {
 	if project.Runtime.CancelCtx != nil {
 		project.Runtime.CancelCtx()
 		project.Runtime.CancelCtx = nil
+		project.Runtime.SupervisorDone = nil
 	}
 	if project.Runtime.Supervisor != nil {
 		if project.Runtime.SupervisorEvents != nil {
