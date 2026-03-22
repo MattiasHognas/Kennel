@@ -250,11 +250,38 @@ func (c *localClient) checkInWorkplace(targetPath string) (string, error) {
 	} else if !os.IsNotExist(evalErr) {
 		return "", evalErr
 	} else {
-		parentDir, parentErr := filepath.EvalSymlinks(filepath.Dir(resolvedTarget))
-		if parentErr != nil {
-			return "", parentErr
+		// Target (or some parent) does not exist. Walk up to the deepest existing
+		// ancestor directory, resolve its symlinks, and then reconstruct the full path.
+		originalTarget := resolvedTarget
+		dir := filepath.Dir(originalTarget)
+
+		var (
+			resolvedAncestor string
+			ancestorErr      error
+		)
+
+		for {
+			resolvedAncestor, ancestorErr = filepath.EvalSymlinks(dir)
+			if ancestorErr == nil {
+				break
+			}
+			if !os.IsNotExist(ancestorErr) {
+				return "", ancestorErr
+			}
+			nextDir := filepath.Dir(dir)
+			if nextDir == dir {
+				// Reached filesystem root without finding an existing ancestor.
+				return "", ancestorErr
+			}
+			dir = nextDir
 		}
-		resolvedTarget = filepath.Join(parentDir, filepath.Base(resolvedTarget))
+
+		remaining, relErr := filepath.Rel(dir, originalTarget)
+		if relErr != nil {
+			return "", relErr
+		}
+
+		resolvedTarget = filepath.Join(resolvedAncestor, remaining)
 	}
 
 	relPath, err := filepath.Rel(resolvedWorkplace, resolvedTarget)
