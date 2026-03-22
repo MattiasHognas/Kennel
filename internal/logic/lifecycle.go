@@ -13,12 +13,29 @@ import (
 )
 
 func defaultAgentsDir() string {
-	exe, err := os.Executable()
-	if err != nil {
-		// Fall back to working directory when the executable path is unavailable.
-		return "."
+	// Allow an explicit override for the agents root directory.
+	if override := os.Getenv("KENNEL_ROOT_DIR"); override != "" {
+		return override
 	}
-	return filepath.Dir(exe)
+
+	exe, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exe)
+		agentsPath := filepath.Join(exeDir, "agents")
+		if info, statErr := os.Stat(agentsPath); statErr == nil && info.IsDir() {
+			// Use the executable directory when it contains an "agents" subdirectory.
+			return exeDir
+		}
+	}
+
+	// Fallback for development/debug runs (e.g. "go run", "dlv") where the
+	// temporary executable directory does not contain the "agents" folder.
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+
+	// Last resort: fall back to the current directory string.
+	return "."
 }
 
 func (m *Model) startSelectedProject() tea.Cmd {
