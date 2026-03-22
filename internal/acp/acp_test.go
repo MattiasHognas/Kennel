@@ -5,12 +5,21 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 )
+
+func isUnsupportedSymlinkError(err error) bool {
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+
+	var linkErr *os.LinkError
+	return errors.As(err, &linkErr) && (errors.Is(linkErr.Err, syscall.ENOTSUP) || errors.Is(linkErr.Err, syscall.ENOSYS))
+}
 
 func TestRequestPermissionWithoutAllowOnceReturnsCancelled(t *testing.T) {
 	client := &localClient{}
@@ -61,7 +70,7 @@ func TestReadTextFileRejectsSymlinkEscape(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 	if err := os.Symlink(outside, linkedDir); err != nil {
-		if errors.Is(err, os.ErrPermission) || strings.Contains(strings.ToLower(err.Error()), "not supported") {
+		if isUnsupportedSymlinkError(err) {
 			t.Skipf("symlink creation unsupported in this environment: %v", err)
 		}
 		t.Fatalf("Symlink returned error: %v", err)
