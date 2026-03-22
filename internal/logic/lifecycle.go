@@ -58,6 +58,12 @@ func (m *Model) stopSelectedProject() {
 		project.Runtime.CancelCtx = nil
 		project.Runtime.SupervisorDone = nil
 	}
+	// Cancel and clear any per-project activity listener context to avoid leaking goroutines.
+	if project.Runtime.ActivityCancel != nil {
+		project.Runtime.ActivityCancel()
+		project.Runtime.ActivityCancel = nil
+		project.Runtime.ActivityDone = nil
+	}
 	if project.Runtime.Supervisor != nil {
 		if project.Runtime.SupervisorEvents != nil {
 			project.Runtime.Supervisor.EventBus.Unsubscribe(eventbus.SupervisorTopic, project.Runtime.SupervisorEvents)
