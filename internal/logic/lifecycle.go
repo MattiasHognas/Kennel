@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 
 	eventbus "MattiasHognas/Kennel/internal/events"
 	"MattiasHognas/Kennel/internal/supervisor"
@@ -10,7 +12,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-const agentsDir = "C:\\source\\Kennel\\"
+func defaultAgentsDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		// Fall back to working directory when the executable path is unavailable.
+		return "."
+	}
+	return filepath.Dir(exe)
+}
 
 func (m *Model) startSelectedProject() tea.Cmd {
 	projectIndex := m.selectedProjectIndex()
@@ -25,7 +34,7 @@ func (m *Model) startSelectedProject() tea.Cmd {
 
 	eb := eventbus.NewEventBus()
 	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic), done: ctx.Done()}
-	sup := supervisor.NewSupervisor(m.repository, eb, agentsDir, project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
+	sup := supervisor.NewSupervisor(m.repository, eb, defaultAgentsDir(), project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
 	project.Runtime.Supervisor = sup
 	project.Runtime.SupervisorEvents = source.channel
 

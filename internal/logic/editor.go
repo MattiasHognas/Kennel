@@ -30,7 +30,7 @@ func newProjectEditor() projectEditor {
 	nameInput.SetWidth(DefaultActivityWidth)
 
 	workplaceInput := textinput.New()
-	workplaceInput.Placeholder = `C:\path\to\workspace`
+	workplaceInput.Placeholder = "/path/to/workspace"
 	workplaceInput.CharLimit = 512
 	workplaceInput.SetWidth(DefaultActivityWidth)
 
