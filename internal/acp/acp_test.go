@@ -3,8 +3,10 @@ package acp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -19,6 +21,65 @@ func isUnsupportedSymlinkError(err error) bool {
 
 	var linkErr *os.LinkError
 	return errors.As(err, &linkErr) && (errors.Is(linkErr.Err, syscall.ENOTSUP) || errors.Is(linkErr.Err, syscall.ENOSYS))
+}
+
+func terminalHelperCommand(t *testing.T, mode string, args ...string) (string, []string) {
+	t.Helper()
+
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable returned error: %v", err)
+	}
+
+	commandArgs := []string{"-test.run=TestTerminalHelperProcess", "--", mode}
+	commandArgs = append(commandArgs, args...)
+	return binary, commandArgs
+}
+
+func terminalHelperArgs() []string {
+	for i, arg := range os.Args {
+		if arg != "--" {
+			continue
+		}
+		if i+1 >= len(os.Args) {
+			return nil
+		}
+		return os.Args[i+1:]
+	}
+
+	return nil
+}
+
+func TestTerminalHelperProcess(t *testing.T) {
+	helperArgs := terminalHelperArgs()
+	if len(helperArgs) == 0 {
+		return
+	}
+
+	switch helperArgs[0] {
+	case "sleep":
+		if len(helperArgs) != 2 {
+			os.Exit(2)
+		}
+		duration, err := time.ParseDuration(helperArgs[1])
+		if err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(duration)
+		os.Exit(0)
+	case "emit-exit":
+		if len(helperArgs) != 3 {
+			os.Exit(2)
+		}
+		fmt.Print(helperArgs[1])
+		exitCode, err := strconv.Atoi(helperArgs[2])
+		if err != nil {
+			os.Exit(2)
+		}
+		os.Exit(exitCode)
+	default:
+		os.Exit(2)
+	}
 }
 
 func TestRequestPermissionWithoutAllowOnceReturnsCancelled(t *testing.T) {
@@ -87,10 +148,11 @@ func TestReadTextFileRejectsSymlinkEscape(t *testing.T) {
 
 func TestWaitForTerminalExitRespectsContext(t *testing.T) {
 	client := &localClient{workplace: t.TempDir(), terminals: make(map[string]*terminalState)}
+	command, args := terminalHelperCommand(t, "sleep", "1s")
 
 	created, err := client.CreateTerminal(context.Background(), acpsdk.CreateTerminalRequest{
-		Command: "/bin/sh",
-		Args:    []string{"-c", "sleep 1"},
+		Command: command,
+		Args:    args,
 	})
 	if err != nil {
 		t.Fatalf("CreateTerminal returned error: %v", err)
@@ -111,10 +173,11 @@ func TestWaitForTerminalExitRespectsContext(t *testing.T) {
 
 func TestWaitForTerminalExitUsesRecordedExitStatusAndReleaseRemovesTerminal(t *testing.T) {
 	client := &localClient{workplace: t.TempDir(), terminals: make(map[string]*terminalState)}
+	command, args := terminalHelperCommand(t, "emit-exit", "output", "7")
 
 	created, err := client.CreateTerminal(context.Background(), acpsdk.CreateTerminalRequest{
-		Command: "/bin/sh",
-		Args:    []string{"-c", "printf output && exit 7"},
+		Command: command,
+		Args:    args,
 	})
 	if err != nil {
 		t.Fatalf("CreateTerminal returned error: %v", err)
