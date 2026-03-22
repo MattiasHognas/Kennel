@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	repository "MattiasHognas/Kennel/internal/data"
 	model "MattiasHognas/Kennel/internal/logic"
@@ -140,6 +142,18 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 
 func seedSampleProjects(repository *repository.SQLiteRepository) error {
 	for _, definition := range sampleProjects() {
+		if wp := definition.Config.Workplace; wp != "" {
+			absWP := wp
+			if !filepath.IsAbs(absWP) {
+				if wd, err := os.Getwd(); err == nil {
+					absWP = filepath.Join(wd, absWP)
+				}
+			}
+			if err := os.MkdirAll(absWP, 0o755); err != nil {
+				return fmt.Errorf("create workplace directory %q: %w", absWP, err)
+			}
+		}
+
 		project, err := repository.CreateProject(context.Background(), definition.Config.Name, definition.Config.Workplace, definition.Config.Instructions)
 		if err != nil {
 			return err
