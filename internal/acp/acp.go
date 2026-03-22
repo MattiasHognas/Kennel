@@ -49,10 +49,12 @@ func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.
 
 	outr, err := cmd.StdoutPipe()
 	if err != nil {
+		inw.Close()
 		return nil, fmt.Errorf("stdout: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
+		inw.Close()
 		return nil, fmt.Errorf("start: %w", err)
 	}
 

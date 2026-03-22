@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 
 	eventbus "MattiasHognas/Kennel/internal/events"
 	"MattiasHognas/Kennel/internal/supervisor"
@@ -10,7 +12,31 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-const agentsDir = "C:\\source\\Kennel\\"
+func defaultAgentsDir() string {
+	// Allow an explicit override for the agents root directory.
+	if override := os.Getenv("KENNEL_ROOT_DIR"); override != "" {
+		return override
+	}
+
+	exe, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exe)
+		agentsPath := filepath.Join(exeDir, "agents")
+		if info, statErr := os.Stat(agentsPath); statErr == nil && info.IsDir() {
+			// Use the executable directory when it contains an "agents" subdirectory.
+			return exeDir
+		}
+	}
+
+	// Fallback for development/debug runs (e.g. "go run", "dlv") where the
+	// temporary executable directory does not contain the "agents" folder.
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+
+	// Last resort: fall back to the current directory string.
+	return "."
+}
 
 func (m *Model) startSelectedProject() tea.Cmd {
 	projectIndex := m.selectedProjectIndex()
@@ -25,7 +51,7 @@ func (m *Model) startSelectedProject() tea.Cmd {
 
 	eb := eventbus.NewEventBus()
 	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic), done: ctx.Done()}
-	sup := supervisor.NewSupervisor(m.repository, eb, agentsDir, project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
+	sup := supervisor.NewSupervisor(m.repository, eb, defaultAgentsDir(), project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
 	project.Runtime.Supervisor = sup
 	project.Runtime.SupervisorEvents = source.channel
 
