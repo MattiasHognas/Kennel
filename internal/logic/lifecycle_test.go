@@ -12,11 +12,17 @@ import (
 
 func TestNewProjectWithoutAgentsCanToggleState(t *testing.T) {
 	repo := newTestRepository(t)
+	projectRecord, err := repo.CreateProject(context.Background(), "Agentless", `C:\src\agentless`, "first line\nsecond line")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
 
 	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
 		Config: ProjectConfig{
-			ProjectID: 1,
-			Name:      "Agentless",
+			ProjectID:    projectRecord.ID,
+			Name:         projectRecord.Name,
+			Workplace:    projectRecord.Workplace,
+			Instructions: projectRecord.Instructions,
 		},
 		State: ProjectState{
 			State: agent.Stopped,
@@ -25,10 +31,7 @@ func TestNewProjectWithoutAgentsCanToggleState(t *testing.T) {
 	m.SetFocus(0)
 	m.projectTable.SetCursor(1)
 
-	updatedModel, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
-	if cmd != nil {
-		cmd()
-	}
+	updatedModel, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	modelAfterStart, ok := updatedModel.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)
@@ -37,10 +40,7 @@ func TestNewProjectWithoutAgentsCanToggleState(t *testing.T) {
 		t.Fatalf("state after start = %s, want %s", modelAfterStart.projects[0].State.State, agent.Running)
 	}
 
-	updatedModel, cmd = modelAfterStart.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
-	if cmd != nil {
-		cmd()
-	}
+	updatedModel, _ = modelAfterStart.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
 	modelAfterStop, ok := updatedModel.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)

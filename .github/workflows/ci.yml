@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify formatting
+        run: |
+          set -euo pipefail
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "Go files not formatted:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./cmd/app
+
+      - name: Test
+        run: go test ./... -timeout 60s
+
+      - name: Install covdata
+        run: |
+          set -euo pipefail
+          tooldir=$(go env GOTOOLDIR)
+          tmpdir=$(mktemp -d)
+          trap 'chmod u-w "$tooldir"; rm -rf "$tmpdir"' EXIT
+          go build -o "$tmpdir/covdata" cmd/covdata
+          chmod u+w "$tooldir"
+          install -m 0755 "$tmpdir/covdata" "$tooldir/covdata"
+
+      - name: Generate coverage report
+        run: go test ./... -timeout 60s -coverprofile=coverage.out
+
+      - name: Summarize coverage
+        run: |
+          go tool cover -func=coverage.out | tee coverage-summary.txt
+          cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            coverage.out
+            coverage-summary.txt
+            coverage.html
