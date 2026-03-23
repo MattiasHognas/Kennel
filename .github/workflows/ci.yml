@@ -38,11 +38,13 @@ jobs:
       - name: Test
         run: go test ./... -timeout 60s
 
-      - name: Generate coverage report
+      - name: Install covdata
         run: |
-          # internal/ui currently fails under Go 1.26.1 coverage with "go: no such tool \"covdata\"".
-          packages=$(go list ./... | grep -v '/internal/ui$')
-          go test $packages -timeout 60s -coverprofile=coverage.out
+          chmod u+w "$(go env GOTOOLDIR)"
+          go install cmd/covdata
+
+      - name: Generate coverage report
+        run: go test ./... -timeout 60s -coverprofile=coverage.out
 
       - name: Summarize coverage
         run: |
