@@ -40,6 +40,7 @@ jobs:
 
       - name: Generate coverage report
         run: |
+          # internal/ui currently fails under Go 1.26.1 coverage with "go: no such tool \"covdata\"".
           packages=$(go list ./... | grep -v '/internal/ui$')
           go test $packages -timeout 60s -coverprofile=coverage.out
 
