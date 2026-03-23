@@ -19,8 +19,10 @@ func TestNewProjectWithoutAgentsCanToggleState(t *testing.T) {
 
 	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
 		Config: ProjectConfig{
-			ProjectID: projectRecord.ID,
-			Name:      projectRecord.Name,
+			ProjectID:    projectRecord.ID,
+			Name:         projectRecord.Name,
+			Workplace:    projectRecord.Workplace,
+			Instructions: projectRecord.Instructions,
 		},
 		State: ProjectState{
 			State: agent.Stopped,
