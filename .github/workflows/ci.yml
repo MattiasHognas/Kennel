@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify formatting
+        run: |
+          test -z "$(gofmt -l .)"
+
+      - name: Build
+        run: go build ./cmd/app
+
+      - name: Test
+        run: go test ./... -timeout 60s
