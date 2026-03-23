@@ -37,3 +37,23 @@ jobs:
 
       - name: Test
         run: go test ./... -timeout 60s
+
+      - name: Generate coverage report
+        run: |
+          packages=$(go list ./... | grep -v '/internal/ui$')
+          go test $packages -timeout 60s -coverprofile=coverage.out
+
+      - name: Summarize coverage
+        run: |
+          go tool cover -func=coverage.out | tee coverage-summary.txt
+          cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            coverage.out
+            coverage-summary.txt
+            coverage.html
