@@ -24,7 +24,13 @@ jobs:
 
       - name: Verify formatting
         run: |
-          test -z "$(gofmt -l .)"
+          set -euo pipefail
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "Go files not formatted:"
+            echo "$files"
+            exit 1
+          fi
 
       - name: Build
         run: go build ./cmd/app
