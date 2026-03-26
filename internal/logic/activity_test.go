@@ -1,16 +1,14 @@
-package model
+package logic
 
 import (
+	data "MattiasHognas/Kennel/internal/data"
+	table "MattiasHognas/Kennel/internal/ui/table"
+	agent "MattiasHognas/Kennel/internal/workers"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	eventbus "MattiasHognas/Kennel/internal/events"
-	logging "MattiasHognas/Kennel/internal/logging"
-	"MattiasHognas/Kennel/internal/ui/table"
-	agent "MattiasHognas/Kennel/internal/workers"
 )
 
 func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
@@ -91,11 +89,11 @@ func TestSupervisorSyncAppliesEventWithoutRepositoryRefresh(t *testing.T) {
 	}}, repo)
 	m.projectTable.SetCursor(1)
 
-	eb := eventbus.NewEventBus()
-	source := supervisorSource{projectIndex: 0, channel: eb.Subscribe(eventbus.SupervisorTopic)}
+	eb := data.NewEventBus()
+	source := supervisorSource{projectIndex: 0, channel: eb.Subscribe(data.SupervisorTopic)}
 	m.projects[0].Runtime.SupervisorEvents = source.channel
 
-	eb.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.SupervisorSyncEvent{
+	eb.Publish(data.SupervisorTopic, data.Event{Payload: data.SupervisorSyncEvent{
 		ProjectID: storedProject.ID,
 		AgentID:   42,
 		Agent:     "planner",
@@ -157,7 +155,7 @@ func TestWaitForSupervisorUpdateStopsOnCancellation(t *testing.T) {
 
 	source := supervisorSource{
 		projectIndex: 0,
-		channel:      make(chan eventbus.Event),
+		channel:      make(chan data.Event),
 		done:         ctx.Done(),
 	}
 	msg := waitForSupervisorUpdate(source)()
@@ -184,7 +182,7 @@ func TestPersistProjectStateLogsRepositoryFailure(t *testing.T) {
 		},
 		State: ProjectState{State: agent.Running},
 		Runtime: ProjectRuntime{
-			Logger: logging.NewProjectLogger(logRoot, storedProject.ID, storedProject.Name),
+			Logger: data.NewProjectLogger(logRoot, storedProject.ID, storedProject.Name),
 		},
 	}}, repo)
 

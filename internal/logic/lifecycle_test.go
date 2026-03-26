@@ -1,14 +1,14 @@
-package model
+package logic
 
 import (
+	data "MattiasHognas/Kennel/internal/data"
+	table "MattiasHognas/Kennel/internal/ui/table"
+	agent "MattiasHognas/Kennel/internal/workers"
+	workers "MattiasHognas/Kennel/internal/workers"
 	"context"
 	"errors"
 	"testing"
 	"time"
-
-	eventbus "MattiasHognas/Kennel/internal/events"
-	"MattiasHognas/Kennel/internal/ui/table"
-	agent "MattiasHognas/Kennel/internal/workers"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -28,7 +28,7 @@ func TestNewProjectWithoutAgentsCanToggleState(t *testing.T) {
 			Instructions: projectRecord.Instructions,
 		},
 		State: ProjectState{
-			State: agent.Stopped,
+			State: workers.Stopped,
 		},
 	}}, repo)
 	m.SetFocus(0)
@@ -39,8 +39,8 @@ func TestNewProjectWithoutAgentsCanToggleState(t *testing.T) {
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)
 	}
-	if modelAfterStart.projects[0].State.State != agent.Running {
-		t.Fatalf("state after start = %s, want %s", modelAfterStart.projects[0].State.State, agent.Running)
+	if modelAfterStart.projects[0].State.State != workers.Running {
+		t.Fatalf("state after start = %s, want %s", modelAfterStart.projects[0].State.State, workers.Running)
 	}
 
 	updatedModel, _ = modelAfterStart.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
@@ -48,8 +48,29 @@ func TestNewProjectWithoutAgentsCanToggleState(t *testing.T) {
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)
 	}
-	if modelAfterStop.projects[0].State.State != agent.Stopped {
-		t.Fatalf("state after stop = %s, want %s", modelAfterStop.projects[0].State.State, agent.Stopped)
+	if modelAfterStop.projects[0].State.State != workers.Stopped {
+		t.Fatalf("state after stop = %s, want %s", modelAfterStop.projects[0].State.State, workers.Stopped)
+	}
+}
+
+func runCmdWithTimeout(t *testing.T, cmd tea.Cmd, timeout time.Duration) tea.Msg {
+	t.Helper()
+
+	if cmd == nil {
+		return nil
+	}
+
+	result := make(chan tea.Msg, 1)
+	go func() {
+		result <- cmd()
+	}()
+
+	select {
+	case msg := <-result:
+		return msg
+	case <-time.After(timeout):
+		t.Fatalf("command timed out after %s", timeout)
+		return nil
 	}
 }
 
@@ -62,7 +83,7 @@ func TestStartSelectedProjectCommandReturnsWhenSupervisorExitsEarly(t *testing.T
 			Name:      "Missing Project",
 		},
 		State: ProjectState{
-			State: agent.Stopped,
+			State: workers.Stopped,
 		},
 	}}, repo)
 	m.SetFocus(0)
@@ -81,8 +102,8 @@ func TestStartSelectedProjectCommandReturnsWhenSupervisorExitsEarly(t *testing.T
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)
 	}
-	if modelAfterStart.projects[0].State.State != agent.Running {
-		t.Fatalf("state after start = %s, want %s", modelAfterStart.projects[0].State.State, agent.Running)
+	if modelAfterStart.projects[0].State.State != workers.Running {
+		t.Fatalf("state after start = %s, want %s", modelAfterStart.projects[0].State.State, workers.Running)
 	}
 	if modelAfterStart.projects[0].Runtime.SupervisorDone == nil {
 		t.Fatal("expected supervisor done signal to be tracked")
@@ -125,17 +146,17 @@ func TestFocusedAgentCyclesBetweenRunningAndStopped(t *testing.T) {
 		t.Fatalf("add agent: %v", err)
 	}
 
-	worker := agent.NewAgent("Worker")
+	worker := workers.NewAgent("Worker")
 	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
 		Config: ProjectConfig{
 			ProjectID: projectRecord.ID,
 			Name:      projectRecord.Name,
 		},
 		State: ProjectState{
-			State: agent.Stopped,
+			State: workers.Stopped,
 		},
 		Runtime: ProjectRuntime{
-			Agents:   []agent.AgentContract{worker},
+			Agents:   []workers.AgentContract{worker},
 			AgentIDs: []int64{agentRecord.ID},
 		},
 	}}, repo)
@@ -149,8 +170,8 @@ func TestFocusedAgentCyclesBetweenRunningAndStopped(t *testing.T) {
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)
 	}
-	if modelAfterStart.projects[0].Runtime.Agents[0].State() != agent.Running {
-		t.Fatalf("agent state after start = %s, want %s", modelAfterStart.projects[0].Runtime.Agents[0].State(), agent.Running)
+	if modelAfterStart.projects[0].Runtime.Agents[0].State() != workers.Running {
+		t.Fatalf("agent state after start = %s, want %s", modelAfterStart.projects[0].Runtime.Agents[0].State(), workers.Running)
 	}
 
 	updatedModel, cmd = modelAfterStart.Update(tea.KeyPressMsg(tea.Key{Code: ' '}))
@@ -159,17 +180,30 @@ func TestFocusedAgentCyclesBetweenRunningAndStopped(t *testing.T) {
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)
 	}
-	if modelAfterStop.projects[0].Runtime.Agents[0].State() != agent.Stopped {
-		t.Fatalf("agent state after stop = %s, want %s", modelAfterStop.projects[0].Runtime.Agents[0].State(), agent.Stopped)
+	if modelAfterStop.projects[0].Runtime.Agents[0].State() != workers.Stopped {
+		t.Fatalf("agent state after stop = %s, want %s", modelAfterStop.projects[0].Runtime.Agents[0].State(), workers.Stopped)
 	}
 
 	persistedProject, err := repo.ReadProject(context.Background(), projectRecord.ID)
 	if err != nil {
 		t.Fatalf("read project: %v", err)
 	}
-	if persistedProject.Agents[0].State != agent.Stopped.String() {
-		t.Fatalf("stored agent state = %q, want %q", persistedProject.Agents[0].State, agent.Stopped.String())
+	if persistedProject.Agents[0].State != workers.Stopped.String() {
+		t.Fatalf("stored agent state = %q, want %q", persistedProject.Agents[0].State, workers.Stopped.String())
 	}
+}
+
+func mustUpdateModel(t *testing.T, m Model, msg tea.Msg) (Model, bool) {
+	t.Helper()
+
+	updatedModel, cmd := m.Update(msg)
+	runCmdWithTimeout(t, cmd, 2*time.Second)
+	result, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+		return Model{}, false
+	}
+	return result, true
 }
 
 func TestCompletedStatesAreNotChangedByUserControls(t *testing.T) {
@@ -184,7 +218,7 @@ func TestCompletedStatesAreNotChangedByUserControls(t *testing.T) {
 		t.Fatalf("add agent: %v", err)
 	}
 
-	worker := agent.NewAgent("Worker")
+	worker := workers.NewAgent("Worker")
 	worker.Complete()
 	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
 		Config: ProjectConfig{
@@ -192,10 +226,10 @@ func TestCompletedStatesAreNotChangedByUserControls(t *testing.T) {
 			Name:      projectRecord.Name,
 		},
 		State: ProjectState{
-			State: agent.Completed,
+			State: workers.Completed,
 		},
 		Runtime: ProjectRuntime{
-			Agents:   []agent.AgentContract{worker},
+			Agents:   []workers.AgentContract{worker},
 			AgentIDs: []int64{agentRecord.ID},
 		},
 	}}, repo)
@@ -205,24 +239,24 @@ func TestCompletedStatesAreNotChangedByUserControls(t *testing.T) {
 	if !ok {
 		return
 	}
-	if projectModel.projects[0].State.State != agent.Completed {
-		t.Fatalf("project state after space = %s, want %s", projectModel.projects[0].State.State, agent.Completed)
+	if projectModel.projects[0].State.State != workers.Completed {
+		t.Fatalf("project state after space = %s, want %s", projectModel.projects[0].State.State, workers.Completed)
 	}
 
 	projectModel, ok = mustUpdateModel(t, projectModel, tea.KeyPressMsg(tea.Key{Code: 's'}))
 	if !ok {
 		return
 	}
-	if projectModel.projects[0].State.State != agent.Completed {
-		t.Fatalf("project state after start = %s, want %s", projectModel.projects[0].State.State, agent.Completed)
+	if projectModel.projects[0].State.State != workers.Completed {
+		t.Fatalf("project state after start = %s, want %s", projectModel.projects[0].State.State, workers.Completed)
 	}
 
 	projectModel, ok = mustUpdateModel(t, projectModel, tea.KeyPressMsg(tea.Key{Code: 'p'}))
 	if !ok {
 		return
 	}
-	if projectModel.projects[0].State.State != agent.Completed {
-		t.Fatalf("project state after stop = %s, want %s", projectModel.projects[0].State.State, agent.Completed)
+	if projectModel.projects[0].State.State != workers.Completed {
+		t.Fatalf("project state after stop = %s, want %s", projectModel.projects[0].State.State, workers.Completed)
 	}
 
 	projectModel.SetFocus(1)
@@ -232,24 +266,24 @@ func TestCompletedStatesAreNotChangedByUserControls(t *testing.T) {
 	if !ok {
 		return
 	}
-	if agentModel.projects[0].Runtime.Agents[0].State() != agent.Completed {
-		t.Fatalf("agent state after space = %s, want %s", agentModel.projects[0].Runtime.Agents[0].State(), agent.Completed)
+	if agentModel.projects[0].Runtime.Agents[0].State() != workers.Completed {
+		t.Fatalf("agent state after space = %s, want %s", agentModel.projects[0].Runtime.Agents[0].State(), workers.Completed)
 	}
 
 	agentModel, ok = mustUpdateModel(t, agentModel, tea.KeyPressMsg(tea.Key{Code: 's'}))
 	if !ok {
 		return
 	}
-	if agentModel.projects[0].Runtime.Agents[0].State() != agent.Completed {
-		t.Fatalf("agent state after start = %s, want %s", agentModel.projects[0].Runtime.Agents[0].State(), agent.Completed)
+	if agentModel.projects[0].Runtime.Agents[0].State() != workers.Completed {
+		t.Fatalf("agent state after start = %s, want %s", agentModel.projects[0].Runtime.Agents[0].State(), workers.Completed)
 	}
 
 	agentModel, ok = mustUpdateModel(t, agentModel, tea.KeyPressMsg(tea.Key{Code: 'p'}))
 	if !ok {
 		return
 	}
-	if agentModel.projects[0].Runtime.Agents[0].State() != agent.Completed {
-		t.Fatalf("agent state after stop = %s, want %s", agentModel.projects[0].Runtime.Agents[0].State(), agent.Completed)
+	if agentModel.projects[0].Runtime.Agents[0].State() != workers.Completed {
+		t.Fatalf("agent state after stop = %s, want %s", agentModel.projects[0].Runtime.Agents[0].State(), workers.Completed)
 	}
 }
 
@@ -265,7 +299,7 @@ func TestProjectCompletesAutomaticallyWhenSupervisorFinishes(t *testing.T) {
 	// is already closed, as if RunPlan returned successfully.
 	done := make(chan struct{})
 	close(done)
-	eventChan := make(chan eventbus.Event)
+	eventChan := make(chan data.Event)
 	source := supervisorSource{
 		projectIndex: 0,
 		channel:      eventChan,
@@ -281,7 +315,7 @@ func TestProjectCompletesAutomaticallyWhenSupervisorFinishes(t *testing.T) {
 			Instructions: projectRecord.Instructions,
 		},
 		State: ProjectState{
-			State: agent.Running,
+			State: workers.Running,
 		},
 		Runtime: ProjectRuntime{
 			SupervisorEvents: source.channel,
@@ -303,8 +337,8 @@ func TestProjectCompletesAutomaticallyWhenSupervisorFinishes(t *testing.T) {
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", modelAfterComplete)
 	}
-	if finalModel.projects[0].State.State != agent.Completed {
-		t.Fatalf("state after supervisor finish = %s, want %s", finalModel.projects[0].State.State, agent.Completed)
+	if finalModel.projects[0].State.State != workers.Completed {
+		t.Fatalf("state after supervisor finish = %s, want %s", finalModel.projects[0].State.State, workers.Completed)
 	}
 
 	// Verify the completed state is persisted.
@@ -312,8 +346,8 @@ func TestProjectCompletesAutomaticallyWhenSupervisorFinishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read project: %v", err)
 	}
-	if stored.State != agent.Completed.String() {
-		t.Fatalf("stored project state = %q, want %q", stored.State, agent.Completed.String())
+	if stored.State != workers.Completed.String() {
+		t.Fatalf("stored project state = %q, want %q", stored.State, workers.Completed.String())
 	}
 }
 
@@ -330,7 +364,7 @@ func TestProjectStopsInsteadOfCompletingWhenSupervisorFails(t *testing.T) {
 	result := make(chan error, 1)
 	result <- errors.New("planner failed")
 	close(result)
-	eventChan := make(chan eventbus.Event)
+	eventChan := make(chan data.Event)
 	source := supervisorSource{
 		projectIndex: 0,
 		channel:      eventChan,
@@ -347,7 +381,7 @@ func TestProjectStopsInsteadOfCompletingWhenSupervisorFails(t *testing.T) {
 			Instructions: projectRecord.Instructions,
 		},
 		State: ProjectState{
-			State: agent.Running,
+			State: workers.Running,
 		},
 		Runtime: ProjectRuntime{
 			SupervisorEvents: source.channel,
@@ -371,8 +405,8 @@ func TestProjectStopsInsteadOfCompletingWhenSupervisorFails(t *testing.T) {
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", modelAfterComplete)
 	}
-	if finalModel.projects[0].State.State != agent.Stopped {
-		t.Fatalf("state after supervisor failure = %s, want %s", finalModel.projects[0].State.State, agent.Stopped)
+	if finalModel.projects[0].State.State != workers.Stopped {
+		t.Fatalf("state after supervisor failure = %s, want %s", finalModel.projects[0].State.State, workers.Stopped)
 	}
 	if finalModel.projects[0].Runtime.Supervisor != nil {
 		t.Fatal("expected supervisor to be cleared after failure")
@@ -382,7 +416,7 @@ func TestProjectStopsInsteadOfCompletingWhenSupervisorFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read project: %v", err)
 	}
-	if stored.State != agent.Stopped.String() {
+	if stored.State != workers.Stopped.String() {
 		t.Fatalf("stored project state = %q, want %q", stored.State, agent.Stopped.String())
 	}
 }

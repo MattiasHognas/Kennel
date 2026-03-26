@@ -1,6 +1,8 @@
-package supervisor_test
+package logic
 
 import (
+	data "MattiasHognas/Kennel/internal/data"
+	repository "MattiasHognas/Kennel/internal/data"
 	"context"
 	"fmt"
 	"os"
@@ -8,11 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	repository "MattiasHognas/Kennel/internal/data"
-	"MattiasHognas/Kennel/internal/discovery"
-	eventbus "MattiasHognas/Kennel/internal/events"
-	"MattiasHognas/Kennel/internal/supervisor"
 )
 
 type stubACPClient struct {
@@ -34,7 +31,7 @@ func (c *stubACPClient) Prompt(ctx context.Context, msg string) (string, error) 
 func (c *stubACPClient) Close() error { return nil }
 
 type trackingRepo struct {
-	*repository.SQLiteRepository
+	*data.SQLiteRepository
 	mu          sync.Mutex
 	checkpoints []string
 }
@@ -50,13 +47,13 @@ func TestRunPlanAddsMissingAgentsAndPersistsPlannerResult(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
 	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
-	eb := eventbus.NewEventBus()
-	syncCh := eb.Subscribe(eventbus.SupervisorTopic)
+	eb := data.NewEventBus()
+	syncCh := eb.Subscribe(data.SupervisorTopic)
 	tracking := &trackingRepo{SQLiteRepository: repo}
-	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
 	var topics []string
-	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
 		topics = append(topics, topic)
 
 		switch topic {
@@ -104,11 +101,11 @@ func TestRunPlanResolvesAgentNameVariants(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
 	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
-	eb := eventbus.NewEventBus()
+	eb := data.NewEventBus()
 	tracking := &trackingRepo{SQLiteRepository: repo}
-	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
-	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
 		switch topic {
 		case "planner":
 			return &stubACPClient{response: `{"streams":[[{"agent":"Frontend Developer","task":"Build UI"}]]}`}, nil
@@ -138,11 +135,11 @@ func TestRunPlanAcceptsGeneralPurposeFallback(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
 	agentsRoot := newTestAgentsRoot(t, "branch-setup")
-	eb := eventbus.NewEventBus()
+	eb := data.NewEventBus()
 	tracking := &trackingRepo{SQLiteRepository: repo}
-	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
-	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
 		switch topic {
 		case "planner":
 			return &stubACPClient{response: `{"streams":[[{"agent":"general_purpose","task":"Handle the implementation directly"}]]}`}, nil
@@ -172,12 +169,12 @@ func TestRunPlanRejectsUnknownAgentBeforeExecution(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
 	agentsRoot := newTestAgentsRoot(t, "branch-setup")
-	eb := eventbus.NewEventBus()
+	eb := data.NewEventBus()
 	tracking := &trackingRepo{SQLiteRepository: repo}
-	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
 	var topics []string
-	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
 		topics = append(topics, topic)
 		return &stubACPClient{response: `{"streams":[[{"agent":"unknown-agent","task":"Do work"}]]}`}, nil
 	}
@@ -212,12 +209,12 @@ func TestRunPlanOmitsPreviousOutputWhenAgentDisablesPromptContext(t *testing.T) 
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
 	agentsRoot := newTestAgentsRoot(t, "branch-setup", "tester")
-	eb := eventbus.NewEventBus()
+	eb := data.NewEventBus()
 	tracking := &trackingRepo{SQLiteRepository: repo}
-	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
 	var testerMessages []string
-	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
 		switch topic {
 		case "planner":
 			return &stubACPClient{response: `{"streams":[[{"agent":"tester","task":"Run focused tests"}]]}`}, nil
@@ -258,11 +255,11 @@ func TestRunPlanMarksPlannerFailedAndStopsProjectOnLaunchFailure(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
 	agentsRoot := newTestAgentsRoot(t)
-	eb := eventbus.NewEventBus()
+	eb := data.NewEventBus()
 	tracking := &trackingRepo{SQLiteRepository: repo}
-	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
-	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
 		if topic != "planner" {
 			t.Fatalf("unexpected ACP topic %q", topic)
 		}
@@ -288,10 +285,10 @@ func TestRunPlanMarksPlannerFailedAndStopsProjectOnLaunchFailure(t *testing.T) {
 	}
 }
 
-func newTestRepository(t *testing.T) *repository.SQLiteRepository {
+func newTestRepository(t *testing.T) *data.SQLiteRepository {
 	t.Helper()
 
-	repo, err := repository.NewSQLiteRepository(filepath.Join(t.TempDir(), "supervisor.db"))
+	repo, err := data.NewSQLiteRepository(filepath.Join(t.TempDir(), "supervisor.db"))
 	if err != nil {
 		t.Fatalf("NewSQLiteRepository returned error: %v", err)
 	}
@@ -302,7 +299,7 @@ func newTestRepository(t *testing.T) *repository.SQLiteRepository {
 	return repo
 }
 
-func newTestProject(t *testing.T, repo *repository.SQLiteRepository) repository.Project {
+func newTestProject(t *testing.T, repo *data.SQLiteRepository) data.Project {
 	t.Helper()
 
 	project, err := repo.CreateProject(context.Background(), "test-project", t.TempDir(), "build something")

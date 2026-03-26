@@ -1,13 +1,12 @@
-package model
+package logic
 
 import (
 	"fmt"
 	"strings"
 
-	repository "MattiasHognas/Kennel/internal/data"
-	"MattiasHognas/Kennel/internal/supervisor"
-	"MattiasHognas/Kennel/internal/ui/table"
-	agent "MattiasHognas/Kennel/internal/workers"
+	data "MattiasHognas/Kennel/internal/data"
+	table "MattiasHognas/Kennel/internal/ui/table"
+	workers "MattiasHognas/Kennel/internal/workers"
 )
 
 const nonSelectableAgentIndex = -1
@@ -32,16 +31,16 @@ type runtimeAgentEntry struct {
 	State      string
 }
 
-func RestorePlanFromStoredAgents(agents []repository.Agent) *supervisor.Plan {
+func RestorePlanFromStoredAgents(agents []data.Agent) *Plan {
 	for _, storedAgent := range agents {
-		if supervisor.CanonicalAgentName(storedAgent.Name) != "planner" {
+		if CanonicalAgentName(storedAgent.Name) != "planner" {
 			continue
 		}
 		if strings.TrimSpace(storedAgent.Output) == "" {
 			continue
 		}
 
-		plan, err := supervisor.ParsePlanOutput(storedAgent.Output)
+		plan, err := ParsePlanOutput(storedAgent.Output)
 		if err != nil {
 			return nil
 		}
@@ -51,7 +50,7 @@ func RestorePlanFromStoredAgents(agents []repository.Agent) *supervisor.Plan {
 	return nil
 }
 
-func buildAgentTableRows(agents []agent.AgentContract, plan *supervisor.Plan, collapsedStreams map[int]bool) ([]table.Row, []agentTableEntry) {
+func buildAgentTableRows(agents []workers.AgentContract, plan *Plan, collapsedStreams map[int]bool) ([]table.Row, []agentTableEntry) {
 	if plan == nil || len(plan.Streams) == 0 {
 		return buildFlatAgentTableRows(agents)
 	}
@@ -74,7 +73,7 @@ func buildAgentTableRows(agents []agent.AgentContract, plan *supervisor.Plan, co
 		}
 
 		for stepIndex, step := range stream {
-			runtimeEntry, found := lookup[supervisor.CanonicalAgentName(step.Agent)]
+			runtimeEntry, found := lookup[CanonicalAgentName(step.Agent)]
 			rowState := "-"
 			displayName := strings.TrimSpace(step.Agent)
 			agentIndex := nonSelectableAgentIndex
@@ -97,7 +96,7 @@ func buildAgentTableRows(agents []agent.AgentContract, plan *supervisor.Plan, co
 	return rows, rowEntries
 }
 
-func buildFlatAgentTableRows(agents []agent.AgentContract) ([]table.Row, []agentTableEntry) {
+func buildFlatAgentTableRows(agents []workers.AgentContract) ([]table.Row, []agentTableEntry) {
 	rows := make([]table.Row, 0, len(agents))
 	rowEntries := make([]agentTableEntry, 0, len(agents))
 	for index, agentInstance := range agents {
@@ -107,10 +106,10 @@ func buildFlatAgentTableRows(agents []agent.AgentContract) ([]table.Row, []agent
 	return rows, rowEntries
 }
 
-func buildRuntimeAgentLookup(agents []agent.AgentContract) map[string]runtimeAgentEntry {
+func buildRuntimeAgentLookup(agents []workers.AgentContract) map[string]runtimeAgentEntry {
 	lookup := make(map[string]runtimeAgentEntry, len(agents))
 	for index, agentInstance := range agents {
-		canonicalName := supervisor.CanonicalAgentName(agentInstance.Name())
+		canonicalName := CanonicalAgentName(agentInstance.Name())
 		if canonicalName == "" {
 			continue
 		}
@@ -127,7 +126,7 @@ func buildRuntimeAgentLookup(agents []agent.AgentContract) map[string]runtimeAge
 	return lookup
 }
 
-func collectPlannedAgents(plan *supervisor.Plan) map[string]struct{} {
+func collectPlannedAgents(plan *Plan) map[string]struct{} {
 	plannedAgents := make(map[string]struct{})
 	if plan == nil {
 		return plannedAgents
@@ -135,7 +134,7 @@ func collectPlannedAgents(plan *supervisor.Plan) map[string]struct{} {
 
 	for _, stream := range plan.Streams {
 		for _, step := range stream {
-			canonicalName := supervisor.CanonicalAgentName(step.Agent)
+			canonicalName := CanonicalAgentName(step.Agent)
 			if canonicalName == "" {
 				continue
 			}
@@ -146,11 +145,11 @@ func collectPlannedAgents(plan *supervisor.Plan) map[string]struct{} {
 	return plannedAgents
 }
 
-func buildUnplannedAgentRows(agents []agent.AgentContract, plannedAgents map[string]struct{}) ([]table.Row, []agentTableEntry) {
+func buildUnplannedAgentRows(agents []workers.AgentContract, plannedAgents map[string]struct{}) ([]table.Row, []agentTableEntry) {
 	rows := make([]table.Row, 0, len(agents))
 	rowEntries := make([]agentTableEntry, 0, len(agents))
 	for index, agentInstance := range agents {
-		if _, planned := plannedAgents[supervisor.CanonicalAgentName(agentInstance.Name())]; planned {
+		if _, planned := plannedAgents[CanonicalAgentName(agentInstance.Name())]; planned {
 			continue
 		}
 

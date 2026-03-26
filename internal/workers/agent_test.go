@@ -1,12 +1,11 @@
-package agent
+package workers
 
 import (
+	data "MattiasHognas/Kennel/internal/data"
 	"context"
 	"fmt"
 	"testing"
 	"time"
-
-	eventbus "MattiasHognas/Kennel/internal/events"
 )
 
 func TestStopPublishesOnlyAfterRun(t *testing.T) {
@@ -17,10 +16,10 @@ func TestStopPublishesOnlyAfterRun(t *testing.T) {
 	assertNoActivity(t, activityCh)
 
 	a.Run(context.Background())
-	assertActivityType(t, activityCh, eventbus.WorkerMessageEvent{})
+	assertActivityType(t, activityCh, data.WorkerMessageEvent{})
 
 	a.Stop()
-	assertActivityType(t, activityCh, eventbus.WorkerCancellationEvent{})
+	assertActivityType(t, activityCh, data.WorkerCancellationEvent{})
 }
 
 func TestCompletePublishesOnlyAfterActivation(t *testing.T) {
@@ -31,10 +30,10 @@ func TestCompletePublishesOnlyAfterActivation(t *testing.T) {
 	assertNoActivity(t, activityCh)
 
 	a.Run(context.Background())
-	assertActivityType(t, activityCh, eventbus.WorkerMessageEvent{})
+	assertActivityType(t, activityCh, data.WorkerMessageEvent{})
 
 	a.Complete()
-	assertActivityType(t, activityCh, eventbus.WorkerCompletionEvent{})
+	assertActivityType(t, activityCh, data.WorkerCompletionEvent{})
 
 	if got := a.State(); got != Completed {
 		t.Fatalf("state = %s, want %s", got, Completed)
@@ -66,17 +65,17 @@ func TestFailPublishesFailureAfterActivation(t *testing.T) {
 	assertNoActivity(t, activityCh)
 
 	a.Run(context.Background())
-	assertActivityType(t, activityCh, eventbus.WorkerMessageEvent{})
+	assertActivityType(t, activityCh, data.WorkerMessageEvent{})
 
 	a.Fail(fmt.Errorf("boom"))
-	assertActivityType(t, activityCh, eventbus.WorkerFailureEvent{})
+	assertActivityType(t, activityCh, data.WorkerFailureEvent{})
 
 	if got := a.State(); got != Failed {
 		t.Fatalf("state = %s, want %s", got, Failed)
 	}
 }
 
-func assertActivityType(t *testing.T, ch <-chan eventbus.Event, wantType interface{}) {
+func assertActivityType(t *testing.T, ch <-chan data.Event, wantType interface{}) {
 	t.Helper()
 
 	select {
@@ -91,7 +90,7 @@ func assertActivityType(t *testing.T, ch <-chan eventbus.Event, wantType interfa
 	}
 }
 
-func assertNoActivity(t *testing.T, ch <-chan eventbus.Event) {
+func assertNoActivity(t *testing.T, ch <-chan data.Event) {
 	t.Helper()
 	select {
 	case event := <-ch:

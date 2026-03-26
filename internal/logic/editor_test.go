@@ -1,11 +1,11 @@
-package model
+package logic
 
 import (
-	agent "MattiasHognas/Kennel/internal/workers"
+	table "MattiasHognas/Kennel/internal/ui/table"
+	workers "MattiasHognas/Kennel/internal/workers"
+
 	"context"
 	"testing"
-
-	"MattiasHognas/Kennel/internal/ui/table"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -19,7 +19,7 @@ func TestEnterOpensProjectEditorAndClickingOKPersistsWorkplace(t *testing.T) {
 	}
 
 	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
-		Config: ProjectConfig{ProjectID: storedProject.ID, Name: storedProject.Name}, State: ProjectState{State: agent.Stopped}, Runtime: ProjectRuntime{},
+		Config: ProjectConfig{ProjectID: storedProject.ID, Name: storedProject.Name}, State: ProjectState{State: workers.Stopped}, Runtime: ProjectRuntime{},
 	}}, repo)
 	m.SetFocus(0)
 	m.projectTable.SetCursor(1)

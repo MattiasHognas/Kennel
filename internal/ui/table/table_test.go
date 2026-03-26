@@ -1,4 +1,4 @@
-package table
+package ui
 
 import (
 	"strings"

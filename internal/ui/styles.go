@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"MattiasHognas/Kennel/internal/ui/table"
+	table "MattiasHognas/Kennel/internal/ui/table"
 
 	lipgloss "charm.land/lipgloss/v2"
 	tint "github.com/lrstanley/bubbletint/v2"

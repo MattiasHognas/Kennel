@@ -1,7 +1,7 @@
-package model
+package logic
 
 import (
-	eventbus "MattiasHognas/Kennel/internal/events"
+	data "MattiasHognas/Kennel/internal/data"
 	"context"
 	"fmt"
 	"time"
@@ -20,19 +20,19 @@ func waitForActivity(source ActivitySource) tea.Cmd {
 			}
 			var text string
 			switch p := event.Payload.(type) {
-			case eventbus.WorkerMessageEvent:
+			case data.WorkerMessageEvent:
 				text = p.Chunk
-			case eventbus.WorkerCancellationEvent:
+			case data.WorkerCancellationEvent:
 				text = p.Reason
-			case eventbus.WorkerCompletionEvent:
+			case data.WorkerCompletionEvent:
 				text = p.Result
-			case eventbus.WorkerFailureEvent:
+			case data.WorkerFailureEvent:
 				if p.Error != nil {
 					text = p.Error.Error()
 				} else {
 					text = "failed"
 				}
-			case eventbus.PlanUpdateEvent:
+			case data.PlanUpdateEvent:
 				text = "Plan updated"
 			case string:
 				text = p
@@ -165,11 +165,11 @@ func waitForSupervisorUpdate(source supervisorSource) tea.Cmd {
 				return nil
 			}
 
-			if planEvent, ok := event.Payload.(eventbus.PlanUpdateEvent); ok {
+			if planEvent, ok := event.Payload.(data.PlanUpdateEvent); ok {
 				return supervisorPlanMsg{source: source, plan: planEvent.Plan}
 			}
 
-			syncEvent, ok := event.Payload.(eventbus.SupervisorSyncEvent)
+			syncEvent, ok := event.Payload.(data.SupervisorSyncEvent)
 			if !ok {
 				return supervisorSyncMsg{source: source}
 			}

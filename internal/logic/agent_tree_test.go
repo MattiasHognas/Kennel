@@ -1,27 +1,25 @@
-package model
+package logic
 
 import (
+	data "MattiasHognas/Kennel/internal/data"
+	table "MattiasHognas/Kennel/internal/ui/table"
+	workers "MattiasHognas/Kennel/internal/workers"
 	"strings"
 	"testing"
-
-	repository "MattiasHognas/Kennel/internal/data"
-	"MattiasHognas/Kennel/internal/supervisor"
-	"MattiasHognas/Kennel/internal/ui/table"
-	agent "MattiasHognas/Kennel/internal/workers"
 
 	tea "charm.land/bubbletea/v2"
 )
 
 func TestPlanTableRendersStreamsAndTogglesCollapse(t *testing.T) {
-	planner := agent.NewAgent("planner")
-	backend := agent.NewAgent("backend-developer")
-	tester := agent.NewAgent("tester")
+	planner := workers.NewAgent("planner")
+	backend := workers.NewAgent("backend-developer")
+	tester := workers.NewAgent("tester")
 
 	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
-		State: ProjectState{State: agent.Stopped},
+		State: ProjectState{State: workers.Stopped},
 		Runtime: ProjectRuntime{
-			Agents: []agent.AgentContract{planner, backend, tester},
-			Plan: &supervisor.Plan{Streams: []supervisor.TaskStream{{
+			Agents: []workers.AgentContract{planner, backend, tester},
+			Plan: &Plan{Streams: []TaskStream{{
 				{Agent: "backend-developer", Task: "Build API"},
 				{Agent: "tester", Task: "Run tests"},
 			}}},
@@ -80,7 +78,7 @@ func TestPlanTableRendersStreamsAndTogglesCollapse(t *testing.T) {
 }
 
 func TestRestorePlanFromStoredAgentsParsesPlannerOutput(t *testing.T) {
-	plan := RestorePlanFromStoredAgents([]repository.Agent{{
+	plan := RestorePlanFromStoredAgents([]data.Agent{{
 		Name:   "planner",
 		Output: "```json\n{\"streams\":[[{\"agent\":\"tester\",\"task\":\"Run tests\"}]]}\n```",
 	}})

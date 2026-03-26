@@ -1,6 +1,8 @@
-package supervisor
+package logic
 
 import (
+	data "MattiasHognas/Kennel/internal/data"
+	workers "MattiasHognas/Kennel/internal/workers"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -10,12 +12,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-
-	"MattiasHognas/Kennel/internal/acp"
-	repository "MattiasHognas/Kennel/internal/data"
-	"MattiasHognas/Kennel/internal/discovery"
-	eventbus "MattiasHognas/Kennel/internal/events"
-	logging "MattiasHognas/Kennel/internal/logging"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -42,10 +38,10 @@ const (
 )
 
 type Repository interface {
-	AddAgentToProject(ctx context.Context, projectID int64, name string) (repository.Agent, error)
+	AddAgentToProject(ctx context.Context, projectID int64, name string) (data.Agent, error)
 	CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error
-	NewActivity(ctx context.Context, projectID int64, agentID sql.NullInt64, text string) (repository.Activity, error)
-	ReadProject(ctx context.Context, projectID int64) (repository.Project, error)
+	NewActivity(ctx context.Context, projectID int64, agentID sql.NullInt64, text string) (data.Activity, error)
+	ReadProject(ctx context.Context, projectID int64) (data.Project, error)
 	UpdateAgentOutput(ctx context.Context, agentID int64, output string) error
 	UpdateAgentState(ctx context.Context, agentID int64, state string) error
 	UpdateProjectState(ctx context.Context, projectID int64, state string) error
@@ -56,24 +52,24 @@ type ACPClient interface {
 	Close() error
 }
 
-type ACPFactory func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (ACPClient, error)
+type ACPFactory func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error)
 
-func DefaultACPFactory(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (ACPClient, error) {
-	return acp.NewWrapper(ctx, definition, eb, workplace, topic)
+func DefaultACPFactory(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+	return workers.NewWrapper(ctx, definition, eb, workplace, topic)
 }
 
 type Supervisor struct {
 	Repo        Repository
-	EventBus    *eventbus.EventBus
+	EventBus    *data.EventBus
 	AgentsDir   string
 	ProjectID   int64
 	ProjectName string
 	Workplace   string
 	AcpFactory  ACPFactory
-	Logger      *logging.ProjectLogger
+	Logger      *data.ProjectLogger
 }
 
-func NewSupervisor(repo Repository, eb *eventbus.EventBus, agentsDir string, projectID int64, projectName string, workplace string) *Supervisor {
+func NewSupervisor(repo Repository, eb *data.EventBus, agentsDir string, projectID int64, projectName string, workplace string) *Supervisor {
 	return &Supervisor{
 		Repo:        repo,
 		EventBus:    eb,
@@ -82,7 +78,7 @@ func NewSupervisor(repo Repository, eb *eventbus.EventBus, agentsDir string, pro
 		ProjectName: projectName,
 		Workplace:   workplace,
 		AcpFactory:  DefaultACPFactory,
-		Logger:      logging.NewProjectLogger(agentsDir, projectID, projectName),
+		Logger:      data.NewProjectLogger(agentsDir, projectID, projectName),
 	}
 }
 
@@ -96,18 +92,18 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 		return s.failStop(ctx, 0, "read_project_failed", err)
 	}
 
-	agentStateMap := make(map[string]repository.Agent)
+	agentStateMap := make(map[string]data.Agent)
 	var agentStateMu sync.RWMutex
 	for _, a := range proj.Agents {
 		agentStateMap[a.Name] = a
 	}
 
-	defs, err := discovery.LoadAgentDefinitions(s.AgentsDir)
+	defs, err := data.LoadAgentDefinitions(s.AgentsDir)
 	if err != nil {
 		return s.failStop(ctx, -1, "discovery_failed", err)
 	}
 
-	agentMap := make(map[string]discovery.AgentDefinition)
+	agentMap := make(map[string]data.AgentDefinition)
 	for _, d := range defs {
 		agentMap[d.Name] = d
 	}
@@ -355,7 +351,7 @@ func normalizePlan(plan *Plan) error {
 	return nil
 }
 
-func resolvePlanAgents(plan *Plan, agentMap map[string]discovery.AgentDefinition) error {
+func resolvePlanAgents(plan *Plan, agentMap map[string]data.AgentDefinition) error {
 	aliases := make(map[string]string, len(agentMap))
 	for name := range agentMap {
 		canonicalName := CanonicalAgentName(name)
@@ -387,7 +383,7 @@ func CanonicalAgentName(name string) string {
 	return strings.Join(parts, "-")
 }
 
-func registerBuiltinAgents(agentMap map[string]discovery.AgentDefinition) {
+func registerBuiltinAgents(agentMap map[string]data.AgentDefinition) {
 	if _, ok := agentMap[plannerAgentName]; !ok {
 		agentMap[plannerAgentName] = builtinAgentDefinition(plannerAgentName)
 	}
@@ -396,14 +392,14 @@ func registerBuiltinAgents(agentMap map[string]discovery.AgentDefinition) {
 	}
 }
 
-func builtinAgentDefinition(name string) discovery.AgentDefinition {
-	return discovery.AgentDefinition{
+func builtinAgentDefinition(name string) data.AgentDefinition {
+	return data.AgentDefinition{
 		Name:         name,
-		LaunchConfig: discovery.LaunchConfig{Binary: "copilot", Args: []string{"--acp"}},
+		LaunchConfig: data.LaunchConfig{Binary: "copilot", Args: []string{"--acp"}},
 	}
 }
 
-func availablePlanningAgents(agentMap map[string]discovery.AgentDefinition, configuredAgents []string) []string {
+func availablePlanningAgents(agentMap map[string]data.AgentDefinition, configuredAgents []string) []string {
 	selected := make([]string, 0, len(agentMap))
 	seen := make(map[string]struct{}, len(agentMap))
 
@@ -439,7 +435,7 @@ func availablePlanningAgents(agentMap map[string]discovery.AgentDefinition, conf
 	return selected
 }
 
-func (s *Supervisor) ensurePlanAgents(ctx context.Context, plan Plan, agentMap map[string]discovery.AgentDefinition, agentStateMap map[string]repository.Agent) error {
+func (s *Supervisor) ensurePlanAgents(ctx context.Context, plan Plan, agentMap map[string]data.AgentDefinition, agentStateMap map[string]data.Agent) error {
 	requiredAgents := collectRequiredAgents(plan)
 
 	for _, agentName := range requiredAgents {
@@ -493,7 +489,7 @@ func buildTaskPrompt(task string, previousOutput string, includePreviousOutput b
 	return fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", task, previousOutput)
 }
 
-func (s *Supervisor) completeAgent(ctx context.Context, agent repository.Agent, output string) error {
+func (s *Supervisor) completeAgent(ctx context.Context, agent data.Agent, output string) error {
 	if err := s.Repo.UpdateAgentOutput(ctx, agent.ID, output); err != nil {
 		return err
 	}
@@ -507,7 +503,7 @@ func (s *Supervisor) completeAgent(ctx context.Context, agent repository.Agent, 
 	return nil
 }
 
-func (s *Supervisor) markAgentFailed(ctx context.Context, agent repository.Agent, cause error) error {
+func (s *Supervisor) markAgentFailed(ctx context.Context, agent data.Agent, cause error) error {
 	if err := s.Repo.UpdateAgentState(ctx, agent.ID, "failed"); err != nil {
 		return err
 	}
@@ -524,7 +520,7 @@ func (s *Supervisor) markAgentFailed(ctx context.Context, agent repository.Agent
 	return nil
 }
 
-func (s *Supervisor) markAgentRunning(ctx context.Context, agent repository.Agent, activity string) error {
+func (s *Supervisor) markAgentRunning(ctx context.Context, agent data.Agent, activity string) error {
 	if err := s.Repo.UpdateAgentState(ctx, agent.ID, "running"); err != nil {
 		return err
 	}
@@ -535,7 +531,7 @@ func (s *Supervisor) markAgentRunning(ctx context.Context, agent repository.Agen
 	return nil
 }
 
-func (s *Supervisor) recordAgentActivity(ctx context.Context, agent repository.Agent, activity string) {
+func (s *Supervisor) recordAgentActivity(ctx context.Context, agent data.Agent, activity string) {
 	activity = strings.TrimSpace(activity)
 	if s.Repo == nil || activity == "" {
 		return
@@ -547,12 +543,12 @@ func (s *Supervisor) recordAgentActivity(ctx context.Context, agent repository.A
 	}
 }
 
-func (s *Supervisor) publishSync(agent repository.Agent, state, activity string) {
+func (s *Supervisor) publishSync(agent data.Agent, state, activity string) {
 	if s.EventBus == nil {
 		return
 	}
 
-	s.EventBus.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.SupervisorSyncEvent{
+	s.EventBus.Publish(data.SupervisorTopic, data.Event{Payload: data.SupervisorSyncEvent{
 		ProjectID: s.ProjectID,
 		AgentID:   agent.ID,
 		Agent:     agent.Name,
@@ -572,7 +568,7 @@ func (s *Supervisor) publishPlan(plan Plan) {
 		return
 	}
 
-	s.EventBus.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.PlanUpdateEvent{Plan: string(encodedPlan)}})
+	s.EventBus.Publish(data.SupervisorTopic, data.Event{Payload: data.PlanUpdateEvent{Plan: string(encodedPlan)}})
 }
 
 func extractPlanJSON(output string) string {
@@ -617,7 +613,7 @@ func (s *Supervisor) failStop(ctx context.Context, stepIndex int, status string,
 	return fmt.Errorf("fail-stop at step %d: %w", stepIndex, originalErr)
 }
 
-func (s *Supervisor) failAgentAndStop(ctx context.Context, agent repository.Agent, stepIndex int, status string, originalErr error) error {
+func (s *Supervisor) failAgentAndStop(ctx context.Context, agent data.Agent, stepIndex int, status string, originalErr error) error {
 	if err := s.markAgentFailed(ctx, agent, originalErr); err != nil {
 		s.reportAgentError(agent.Name, "Failed to persist agent failure: %v", err)
 	}
@@ -674,7 +670,7 @@ func (s *Supervisor) attachACPLogger(client ACPClient) {
 	if s.Logger == nil || client == nil {
 		return
 	}
-	if loggerAware, ok := client.(interface{ SetLogger(*logging.ProjectLogger) }); ok {
+	if loggerAware, ok := client.(interface{ SetLogger(*data.ProjectLogger) }); ok {
 		loggerAware.SetLogger(s.Logger)
 	}
 }

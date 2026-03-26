@@ -1,6 +1,7 @@
-package acp
+package workers
 
 import (
+	data "MattiasHognas/Kennel/internal/data"
 	"context"
 	"errors"
 	"fmt"
@@ -11,9 +12,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"MattiasHognas/Kennel/internal/discovery"
-	"MattiasHognas/Kennel/internal/logging"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 )
@@ -93,8 +91,8 @@ func TestTerminalHelperProcess(t *testing.T) {
 
 func TestRequestPermissionWithoutAllowOnceReturnsCancelled(t *testing.T) {
 	client := &localClient{
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{RequestPermission: true},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{RequestPermission: true},
 		},
 	}
 
@@ -117,8 +115,8 @@ func TestRequestPermissionWithoutAllowOnceReturnsCancelled(t *testing.T) {
 
 func TestRequestPermissionBlocksWhenACPToolIsDisabled(t *testing.T) {
 	client := &localClient{
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{RequestPermission: false},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{RequestPermission: false},
 		},
 	}
 
@@ -143,9 +141,9 @@ func TestACPToolErrorsAreLoggedBeforeReturn(t *testing.T) {
 	rootDir := t.TempDir()
 	client := &localClient{
 		topic:  "tester",
-		logger: logging.NewProjectLogger(rootDir, 5, "ACP Errors"),
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{RequestPermission: false},
+		logger: data.NewProjectLogger(rootDir, 5, "ACP Errors"),
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{RequestPermission: false},
 		},
 	}
 
@@ -186,8 +184,8 @@ func TestWriteTextFileResolvesRelativePathsWithinWorkplace(t *testing.T) {
 	workplace := t.TempDir()
 	client := &localClient{
 		workplace: workplace,
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{ReadTextFile: true, WriteTextFile: true},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{ReadTextFile: true, WriteTextFile: true},
 		},
 	}
 
@@ -211,8 +209,8 @@ func TestWriteTextFileResolvesRelativePathsWithinWorkplace(t *testing.T) {
 func TestWriteTextFileBlocksWhenACPToolIsDisabled(t *testing.T) {
 	client := &localClient{
 		workplace: t.TempDir(),
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{WriteTextFile: false},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{WriteTextFile: false},
 		},
 	}
 
@@ -244,8 +242,8 @@ func TestReadTextFileRejectsSymlinkEscape(t *testing.T) {
 
 	client := &localClient{
 		workplace: workplace,
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{ReadTextFile: true},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{ReadTextFile: true},
 		},
 	}
 	_, err := client.ReadTextFile(context.Background(), acpsdk.ReadTextFileRequest{
@@ -260,8 +258,8 @@ func TestWaitForTerminalExitRespectsContext(t *testing.T) {
 	client := &localClient{
 		workplace: t.TempDir(),
 		terminals: make(map[string]*terminalState),
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{CreateTerminal: true, KillTerminal: true, WaitForTerminal: true},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{CreateTerminal: true, KillTerminal: true, WaitForTerminal: true},
 		},
 	}
 	command, args := terminalHelperCommand(t, "sleep", "1s")
@@ -291,8 +289,8 @@ func TestWaitForTerminalExitUsesRecordedExitStatusAndReleaseRemovesTerminal(t *t
 	client := &localClient{
 		workplace: t.TempDir(),
 		terminals: make(map[string]*terminalState),
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{CreateTerminal: true, TerminalOutput: true, ReleaseTerminal: true, WaitForTerminal: true},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{CreateTerminal: true, TerminalOutput: true, ReleaseTerminal: true, WaitForTerminal: true},
 		},
 	}
 	command, args := terminalHelperCommand(t, "emit-exit", "output", "7")
@@ -330,7 +328,7 @@ func TestWaitForTerminalExitUsesRecordedExitStatusAndReleaseRemovesTerminal(t *t
 }
 
 func TestBuildMCPServersMapsTransportsAndMetadata(t *testing.T) {
-	servers, err := buildMCPServers([]discovery.MCPServer{
+	servers, err := buildMCPServers([]data.MCPServer{
 		{
 			Transport: "stdio",
 			Name:      "playwright",
@@ -381,8 +379,8 @@ func TestBuildMCPServersReturnsEmptyArrayForMissingConfig(t *testing.T) {
 func TestCreateTerminalBlocksWhenACPToolIsDisabled(t *testing.T) {
 	client := &localClient{
 		workplace: t.TempDir(),
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{CreateTerminal: false},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{CreateTerminal: false},
 		},
 	}
 
@@ -399,8 +397,8 @@ func TestTerminalOutputBlocksWhenACPToolIsDisabled(t *testing.T) {
 	client := &localClient{
 		workplace: t.TempDir(),
 		terminals: map[string]*terminalState{"123": {}},
-		permissions: discovery.PermissionsConfig{
-			ACP: discovery.ACPPermissions{TerminalOutput: false},
+		permissions: data.PermissionsConfig{
+			ACP: data.ACPPermissions{TerminalOutput: false},
 		},
 	}
 
@@ -425,9 +423,9 @@ func TestReadTextFileBlocksGitMetadataWhenGitVisibilityRestricted(t *testing.T) 
 
 	client := &localClient{
 		workplace: workplace,
-		permissions: discovery.PermissionsConfig{
-			Git: discovery.GitPermissions{Status: false, Diff: false, History: false},
-			ACP: discovery.ACPPermissions{ReadTextFile: true},
+		permissions: data.PermissionsConfig{
+			Git: data.GitPermissions{Status: false, Diff: false, History: false},
+			ACP: data.ACPPermissions{ReadTextFile: true},
 		},
 	}
 
@@ -443,9 +441,9 @@ func TestReadTextFileBlocksGitMetadataWhenGitVisibilityRestricted(t *testing.T) 
 func TestCreateTerminalBlocksRestrictedGitCommands(t *testing.T) {
 	client := &localClient{
 		workplace: t.TempDir(),
-		permissions: discovery.PermissionsConfig{
-			Git: discovery.GitPermissions{Status: true, Diff: false, History: false},
-			ACP: discovery.ACPPermissions{CreateTerminal: true},
+		permissions: data.PermissionsConfig{
+			Git: data.GitPermissions{Status: true, Diff: false, History: false},
+			ACP: data.ACPPermissions{CreateTerminal: true},
 		},
 	}
 
@@ -474,9 +472,9 @@ func TestCreateTerminalBlocksRestrictedGitCommands(t *testing.T) {
 func TestCreateTerminalBlocksGitInsideShellScript(t *testing.T) {
 	client := &localClient{
 		workplace: t.TempDir(),
-		permissions: discovery.PermissionsConfig{
-			Git: discovery.GitPermissions{Status: false, Diff: false, History: false},
-			ACP: discovery.ACPPermissions{CreateTerminal: true},
+		permissions: data.PermissionsConfig{
+			Git: data.GitPermissions{Status: false, Diff: false, History: false},
+			ACP: data.ACPPermissions{CreateTerminal: true},
 		},
 		terminals: make(map[string]*terminalState),
 	}

@@ -1,6 +1,7 @@
-package acp
+package workers
 
 import (
+	data "MattiasHognas/Kennel/internal/data"
 	"context"
 	"errors"
 	"fmt"
@@ -12,10 +13,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-
-	"MattiasHognas/Kennel/internal/discovery"
-	eventbus "MattiasHognas/Kennel/internal/events"
-	logging "MattiasHognas/Kennel/internal/logging"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -39,13 +36,13 @@ type Wrapper struct {
 	cmd     *exec.Cmd
 	conn    *acp.ClientSideConnection
 	handler *localClient
-	eb      *eventbus.EventBus
+	eb      *data.EventBus
 	topic   string
 	session acp.SessionId
-	logger  *logging.ProjectLogger
+	logger  *data.ProjectLogger
 }
 
-func logAndWrapAgentError(logger *logging.ProjectLogger, agentName, prefix string, err error) error {
+func logAndWrapAgentError(logger *data.ProjectLogger, agentName, prefix string, err error) error {
 	wrapped := fmt.Errorf("%s: %w", prefix, err)
 	if logger != nil {
 		logger.LogAgentError(agentName, wrapped.Error())
@@ -53,7 +50,7 @@ func logAndWrapAgentError(logger *logging.ProjectLogger, agentName, prefix strin
 	return wrapped
 }
 
-func logAndReturnAgentError(logger *logging.ProjectLogger, agentName, message string) error {
+func logAndReturnAgentError(logger *data.ProjectLogger, agentName, message string) error {
 	err := errors.New(message)
 	if logger != nil {
 		logger.LogAgentError(agentName, err.Error())
@@ -61,7 +58,7 @@ func logAndReturnAgentError(logger *logging.ProjectLogger, agentName, message st
 	return err
 }
 
-func NewWrapper(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (*Wrapper, error) {
+func NewWrapper(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (*Wrapper, error) {
 	cmd := exec.CommandContext(ctx, definition.LaunchConfig.Binary, definition.LaunchConfig.Args...)
 	cmd.Dir = workplace
 	cmd.Env = appendCommandEnv(definition.LaunchConfig.Env)
@@ -204,7 +201,7 @@ func appendCommandEnv(overrides map[string]string) []string {
 	return env
 }
 
-func buildMCPServers(configs []discovery.MCPServer) ([]acp.McpServer, error) {
+func buildMCPServers(configs []data.MCPServer) ([]acp.McpServer, error) {
 	if len(configs) == 0 {
 		return []acp.McpServer{}, nil
 	}
@@ -291,7 +288,7 @@ type terminalState struct {
 	done     chan struct{}
 	waitErr  error
 	exitCode *int
-	logger   *logging.ProjectLogger
+	logger   *data.ProjectLogger
 	agent    string
 }
 
@@ -345,12 +342,12 @@ func (t *terminalState) exitResult() (*int, error) {
 
 type localClient struct {
 	mu          sync.Mutex
-	eb          *eventbus.EventBus
+	eb          *data.EventBus
 	topic       string
 	workplace   string
 	textChan    chan string
-	permissions discovery.PermissionsConfig
-	logger      *logging.ProjectLogger
+	permissions data.PermissionsConfig
+	logger      *data.ProjectLogger
 
 	terminalsMu sync.Mutex
 	terminals   map[string]*terminalState
@@ -364,7 +361,7 @@ func (c *localClient) fail(message string) error {
 	return logAndReturnAgentError(c.logger, c.topic, message)
 }
 
-func (w *Wrapper) SetLogger(logger *logging.ProjectLogger) {
+func (w *Wrapper) SetLogger(logger *data.ProjectLogger) {
 	w.logger = logger
 	if w.handler != nil {
 		w.handler.logger = logger
@@ -372,7 +369,7 @@ func (w *Wrapper) SetLogger(logger *logging.ProjectLogger) {
 }
 
 func (c *localClient) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
-	c.eb.Publish(c.topic, eventbus.Event{Payload: eventbus.WorkerMessageEvent{Chunk: "received update"}})
+	c.eb.Publish(c.topic, data.Event{Payload: data.WorkerMessageEvent{Chunk: "received update"}})
 	if params.Update.AgentMessageChunk != nil {
 		if textBlock := params.Update.AgentMessageChunk.Content.Text; textBlock != nil {
 			c.mu.Lock()
