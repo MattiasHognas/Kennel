@@ -16,6 +16,25 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 )
 
+type fakePromptConnection struct {
+	prompt func(context.Context, acpsdk.PromptRequest) (acpsdk.PromptResponse, error)
+	cancel func(context.Context, acpsdk.CancelNotification) error
+}
+
+func (c *fakePromptConnection) Prompt(ctx context.Context, req acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+	if c.prompt != nil {
+		return c.prompt(ctx, req)
+	}
+	return acpsdk.PromptResponse{}, nil
+}
+
+func (c *fakePromptConnection) Cancel(ctx context.Context, req acpsdk.CancelNotification) error {
+	if c.cancel != nil {
+		return c.cancel(ctx, req)
+	}
+	return nil
+}
+
 func isUnsupportedSymlinkError(err error) bool {
 	if errors.Is(err, os.ErrPermission) {
 		return true
@@ -176,6 +195,54 @@ func TestACPToolErrorsAreLoggedBeforeReturn(t *testing.T) {
 	for _, fragment := range []string{"ERROR", "agent=tester", "access denied", "requestPermission"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("project log missing %q:\n%s", fragment, text)
+		}
+	}
+}
+
+func TestWrapperPromptAggregatesChunksWithoutProjectChunkLogs(t *testing.T) {
+	rootDir := t.TempDir()
+	handler := &localClient{}
+	wrapper := &Wrapper{
+		conn: &fakePromptConnection{
+			prompt: func(ctx context.Context, req acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+				handler.mu.Lock()
+				ch := handler.textChan
+				handler.mu.Unlock()
+				for _, chunk := range []string{"hello", " ", "world"} {
+					ch <- chunk
+				}
+				return acpsdk.PromptResponse{}, nil
+			},
+		},
+		handler: handler,
+		topic:   "tester",
+		session: "session",
+		logger:  data.NewProjectLogger(rootDir, 7, "Example Project"),
+	}
+
+	result, err := wrapper.Prompt(context.Background(), "say hello")
+	if err != nil {
+		t.Fatalf("Prompt returned error: %v", err)
+	}
+	if result != "hello world" {
+		t.Fatalf("Prompt result = %q, want %q", result, "hello world")
+	}
+
+	entries, err := os.ReadDir(filepath.Join(rootDir, "logs"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		t.Fatalf("ReadDir returned error: %v", err)
+	}
+
+	for _, entry := range entries {
+		content, readErr := os.ReadFile(filepath.Join(rootDir, "logs", entry.Name()))
+		if readErr != nil {
+			t.Fatalf("ReadFile returned error: %v", readErr)
+		}
+		if strings.Contains(string(content), "OUTPUT_CHUNK") {
+			t.Fatalf("project log unexpectedly contains OUTPUT_CHUNK entries:\n%s", string(content))
 		}
 	}
 }

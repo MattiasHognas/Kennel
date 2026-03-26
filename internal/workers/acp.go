@@ -34,12 +34,17 @@ func (f *FakeClient) Close() error { return nil }
 
 type Wrapper struct {
 	cmd     *exec.Cmd
-	conn    *acp.ClientSideConnection
+	conn    promptConnection
 	handler *localClient
 	eb      *data.EventBus
 	topic   string
 	session acp.SessionId
 	logger  *data.ProjectLogger
+}
+
+type promptConnection interface {
+	Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error)
+	Cancel(ctx context.Context, params acp.CancelNotification) error
 }
 
 func logAndWrapAgentError(logger *data.ProjectLogger, agentName, prefix string, err error) error {
@@ -158,9 +163,6 @@ func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
 	// Block and aggregate chunks until the agent finishes processing
 	for chunk := range textChan {
 		sb.WriteString(chunk)
-		if w.logger != nil && strings.TrimSpace(chunk) != "" {
-			w.logger.LogAgentEvent(w.topic, "OUTPUT_CHUNK", chunk)
-		}
 	}
 
 	err := <-errChan
