@@ -33,13 +33,14 @@ func (f *FakeClient) Prompt(ctx context.Context, msg string) (string, error) {
 func (f *FakeClient) Close() error { return nil }
 
 type Wrapper struct {
-	cmd     *exec.Cmd
-	conn    promptConnection
-	handler *localClient
-	eb      *data.EventBus
-	topic   string
-	session acp.SessionId
-	logger  *data.ProjectLogger
+	cmd          *exec.Cmd
+	conn         promptConnection
+	handler      *localClient
+	eb           *data.EventBus
+	topic        string
+	session      acp.SessionId
+	logger       *data.ProjectLogger
+	instructions string
 }
 
 type promptConnection interface {
@@ -71,6 +72,11 @@ func NewWrapper(ctx context.Context, definition data.AgentDefinition, eb *data.E
 	resolvedWorkplace, err := normalizeWorkplacePath(workplace)
 	if err != nil {
 		return nil, logAndWrapAgentError(nil, topic, "workplace", err)
+	}
+
+	instructions, err := loadAgentInstructions(definition.InstructionsPath)
+	if err != nil {
+		return nil, logAndWrapAgentError(nil, topic, "instructions", err)
 	}
 
 	cmd := exec.CommandContext(ctx, definition.LaunchConfig.Binary, definition.LaunchConfig.Args...)
@@ -123,17 +129,19 @@ func NewWrapper(ctx context.Context, definition data.AgentDefinition, eb *data.E
 	}
 
 	return &Wrapper{
-		cmd:     cmd,
-		conn:    conn,
-		handler: handler,
-		eb:      eb,
-		topic:   topic,
-		session: sessionRes.SessionId,
+		cmd:          cmd,
+		conn:         conn,
+		handler:      handler,
+		eb:           eb,
+		topic:        topic,
+		session:      sessionRes.SessionId,
+		instructions: instructions,
 	}, nil
 }
 
 func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
 	textChan := make(chan string, 100)
+	promptText := formatPromptWithInstructions(w.instructions, msg)
 
 	w.handler.mu.Lock()
 	// Channel to signal and stream text chunks
@@ -146,7 +154,7 @@ func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
 		_, err := w.conn.Prompt(ctx, acp.PromptRequest{
 			SessionId: w.session,
 			Prompt: []acp.ContentBlock{
-				acp.TextBlock(msg),
+				acp.TextBlock(promptText),
 			},
 		})
 		// The acp-go-sdk signals termination here by returning from Prompt.
@@ -172,7 +180,7 @@ func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
 
 	result := sb.String()
 	if result == "" {
-		return "Prompt sent successfully", nil
+		return "", logAndReturnAgentError(w.logger, w.topic, "agent produced no output")
 	}
 	return result, nil
 }
@@ -197,6 +205,33 @@ func FormatPrompt(msg string, activities []string) string {
 	sb.WriteString("--- End resume context ---\n")
 	sb.WriteString(msg)
 	return sb.String()
+}
+
+func loadAgentInstructions(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(content)), nil
+}
+
+func formatPromptWithInstructions(instructions string, msg string) string {
+	instructions = strings.TrimSpace(instructions)
+	msg = strings.TrimSpace(msg)
+	if instructions == "" {
+		return msg
+	}
+	if msg == "" {
+		return fmt.Sprintf("Agent instructions:\n%s", instructions)
+	}
+
+	return fmt.Sprintf("Agent instructions:\n%s\n\nTask prompt:\n%s", instructions, msg)
 }
 
 func appendCommandEnv(overrides map[string]string) []string {
@@ -524,7 +559,7 @@ func (c *localClient) RequestPermission(ctx context.Context, params acp.RequestP
 		return acp.RequestPermissionResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolRequestPermission); err != nil {
-		return acp.RequestPermissionResponse{}, c.failWrap("access denied", err)
+		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 	}
 	var permissionOption *acp.PermissionOption
 	for _, option := range params.Options {

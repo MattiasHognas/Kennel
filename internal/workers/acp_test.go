@@ -132,14 +132,14 @@ func TestRequestPermissionWithoutAllowOnceReturnsCancelled(t *testing.T) {
 	}
 }
 
-func TestRequestPermissionBlocksWhenACPToolIsDisabled(t *testing.T) {
+func TestRequestPermissionReturnsCancelledWhenACPToolIsDisabled(t *testing.T) {
 	client := &localClient{
 		permissions: data.PermissionsConfig{
 			ACP: data.ACPPermissions{RequestPermission: false},
 		},
 	}
 
-	_, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
+	resp, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
 		SessionId: "session",
 		ToolCall:  acpsdk.RequestPermissionToolCall{ToolCallId: "tool-call"},
 		Options: []acpsdk.PermissionOption{{
@@ -148,15 +148,15 @@ func TestRequestPermissionBlocksWhenACPToolIsDisabled(t *testing.T) {
 			Kind:     acpsdk.PermissionOptionKindAllowOnce,
 		}},
 	})
-	if err == nil {
-		t.Fatal("RequestPermission returned nil error, want acp tool denial")
+	if err != nil {
+		t.Fatalf("RequestPermission returned error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "requestPermission") {
-		t.Fatalf("RequestPermission error = %v, want requestPermission denial", err)
+	if resp.Outcome.Cancelled == nil {
+		t.Fatalf("outcome = %#v, want cancelled", resp.Outcome)
 	}
 }
 
-func TestACPToolErrorsAreLoggedBeforeReturn(t *testing.T) {
+func TestRequestPermissionDisabledDoesNotLogAccessDeniedError(t *testing.T) {
 	rootDir := t.TempDir()
 	client := &localClient{
 		topic:  "tester",
@@ -166,7 +166,7 @@ func TestACPToolErrorsAreLoggedBeforeReturn(t *testing.T) {
 		},
 	}
 
-	_, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
+	resp, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
 		SessionId: "session",
 		ToolCall:  acpsdk.RequestPermissionToolCall{ToolCallId: "tool-call"},
 		Options: []acpsdk.PermissionOption{{
@@ -175,12 +175,18 @@ func TestACPToolErrorsAreLoggedBeforeReturn(t *testing.T) {
 			Kind:     acpsdk.PermissionOptionKindAllowOnce,
 		}},
 	})
-	if err == nil {
-		t.Fatal("RequestPermission returned nil error, want logged acp tool denial")
+	if err != nil {
+		t.Fatalf("RequestPermission returned error: %v", err)
+	}
+	if resp.Outcome.Cancelled == nil {
+		t.Fatalf("outcome = %#v, want cancelled", resp.Outcome)
 	}
 
 	entries, readErr := os.ReadDir(filepath.Join(rootDir, "logs"))
 	if readErr != nil {
+		if errors.Is(readErr, os.ErrNotExist) {
+			return
+		}
 		t.Fatalf("ReadDir returned error: %v", readErr)
 	}
 	if len(entries) != 1 {
@@ -192,10 +198,8 @@ func TestACPToolErrorsAreLoggedBeforeReturn(t *testing.T) {
 		t.Fatalf("ReadFile returned error: %v", readErr)
 	}
 	text := string(content)
-	for _, fragment := range []string{"ERROR", "agent=tester", "access denied", "requestPermission"} {
-		if !strings.Contains(text, fragment) {
-			t.Fatalf("project log missing %q:\n%s", fragment, text)
-		}
+	if strings.Contains(text, "access denied") || strings.Contains(text, "requestPermission") {
+		t.Fatalf("project log unexpectedly contains permission error details:\n%s", text)
 	}
 }
 
@@ -244,6 +248,83 @@ func TestWrapperPromptAggregatesChunksWithoutProjectChunkLogs(t *testing.T) {
 		if strings.Contains(string(content), "OUTPUT_CHUNK") {
 			t.Fatalf("project log unexpectedly contains OUTPUT_CHUNK entries:\n%s", string(content))
 		}
+	}
+}
+
+func TestWrapperPromptPrependsAgentInstructions(t *testing.T) {
+	handler := &localClient{}
+	var seenPrompt acpsdk.PromptRequest
+	wrapper := &Wrapper{
+		conn: &fakePromptConnection{
+			prompt: func(ctx context.Context, req acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+				seenPrompt = req
+				handler.mu.Lock()
+				ch := handler.textChan
+				handler.mu.Unlock()
+				ch <- "ok"
+				return acpsdk.PromptResponse{}, nil
+			},
+		},
+		handler:      handler,
+		topic:        "branch-setup",
+		session:      "session",
+		instructions: "Create or check out the project branch.",
+	}
+
+	_, err := wrapper.Prompt(context.Background(), "Task: Initialize branch context")
+	if err != nil {
+		t.Fatalf("Prompt returned error: %v", err)
+	}
+
+	if len(seenPrompt.Prompt) != 1 {
+		t.Fatalf("prompt block count = %d, want 1", len(seenPrompt.Prompt))
+	}
+	if seenPrompt.Prompt[0].Text == nil {
+		t.Fatalf("prompt content = %#v, want text block", seenPrompt.Prompt[0])
+	}
+
+	text := seenPrompt.Prompt[0].Text.Text
+	if !strings.Contains(text, "Agent instructions:\nCreate or check out the project branch.") {
+		t.Fatalf("prompt text = %q, want injected agent instructions", text)
+	}
+	if !strings.Contains(text, "Task prompt:\nTask: Initialize branch context") {
+		t.Fatalf("prompt text = %q, want task prompt section", text)
+	}
+}
+
+func TestWrapperPromptReturnsErrorWhenAgentProducesNoOutput(t *testing.T) {
+	wrapper := &Wrapper{
+		conn: &fakePromptConnection{
+			prompt: func(ctx context.Context, req acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+				return acpsdk.PromptResponse{}, nil
+			},
+		},
+		handler: &localClient{},
+		topic:   "planner",
+		session: "session",
+	}
+
+	_, err := wrapper.Prompt(context.Background(), "Task: Plan the work")
+	if err == nil {
+		t.Fatal("Prompt returned nil error, want empty-output failure")
+	}
+	if !strings.Contains(err.Error(), "agent produced no output") {
+		t.Fatalf("Prompt error = %v, want empty-output failure", err)
+	}
+}
+
+func TestLoadAgentInstructionsTrimsWhitespace(t *testing.T) {
+	instructionsPath := filepath.Join(t.TempDir(), "instructions.md")
+	if err := os.WriteFile(instructionsPath, []byte("\n# system prompt\n\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	instructions, err := loadAgentInstructions(instructionsPath)
+	if err != nil {
+		t.Fatalf("loadAgentInstructions returned error: %v", err)
+	}
+	if instructions != "# system prompt" {
+		t.Fatalf("instructions = %q, want trimmed content", instructions)
 	}
 }
 

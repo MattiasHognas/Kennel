@@ -215,7 +215,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		}
 		s.attachACPLogger(setupWrapper)
 
-		setupPrompt := buildTaskPrompt(branchSetupTask.Task, rawJSON, branchSetupDef.PromptContext.PreviousOutput)
+		setupPrompt := s.buildBranchSetupPrompt(branchSetupTask.Task, rawJSON, branchSetupDef.PromptContext.PreviousOutput)
 		s.logAgentInput(branchSetupTask.Agent, setupPrompt)
 		setupOut, err = setupWrapper.Prompt(ctx, setupPrompt)
 		setupWrapper.Close()
@@ -487,6 +487,69 @@ func buildTaskPrompt(task string, previousOutput string, includePreviousOutput b
 	}
 
 	return fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", task, previousOutput)
+}
+
+func (s *Supervisor) buildBranchSetupPrompt(task string, planJSON string, includePlan bool) string {
+	projectSlug := branchProjectSlug(s.ProjectName)
+	runID := branchRunID(s.Logger)
+	branchName := projectSlug
+	if runID != "" {
+		branchName = fmt.Sprintf("%s/%s", projectSlug, runID)
+	}
+
+	sections := []string{
+		fmt.Sprintf("Task: %s", task),
+		fmt.Sprintf("Project name: %s", strings.TrimSpace(s.ProjectName)),
+		fmt.Sprintf("Project slug: %s", projectSlug),
+		fmt.Sprintf("Run id: %s", runID),
+		fmt.Sprintf("Suggested branch name: %s", branchName),
+		fmt.Sprintf("Workplace: %s", strings.TrimSpace(s.Workplace)),
+	}
+
+	if includePlan && strings.TrimSpace(planJSON) != "" {
+		sections = append(sections, fmt.Sprintf("Plan JSON: %s", planJSON))
+	}
+
+	return strings.Join(sections, "\n\n")
+}
+
+func branchProjectSlug(projectName string) string {
+	slug := sanitizePromptSegment(projectName)
+	if slug == "" {
+		return "project"
+	}
+	return slug
+}
+
+func branchRunID(logger *data.ProjectLogger) string {
+	if logger == nil {
+		return ""
+	}
+	return sanitizePromptSegment(logger.RunID())
+}
+
+func sanitizePromptSegment(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastDash = false
+		case r == '-', r == '_', r == ' ', r == '.':
+			if !lastDash {
+				builder.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+
+	return strings.Trim(builder.String(), "-")
 }
 
 func (s *Supervisor) completeAgent(ctx context.Context, agent data.Agent, output string) error {

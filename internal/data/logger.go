@@ -27,6 +27,13 @@ func NewProjectLogger(rootDir string, projectID int64, projectName string) *Proj
 	}
 }
 
+func (l *ProjectLogger) RunID() string {
+	if l == nil {
+		return ""
+	}
+	return l.runID
+}
+
 func (l *ProjectLogger) LogProject(eventType, message string) {
 	if l == nil {
 		return

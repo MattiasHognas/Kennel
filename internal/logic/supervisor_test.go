@@ -251,6 +251,52 @@ func TestRunPlanOmitsPreviousOutputWhenAgentDisablesPromptContext(t *testing.T) 
 	}
 }
 
+func TestRunPlanPassesConcreteBranchContextToBranchSetup(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	var branchSetupMessages []string
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		switch topic {
+		case "planner":
+			return &stubACPClient{response: `{"streams":[[{"agent":"frontend-developer","task":"Build UI"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready", messages: &branchSetupMessages}, nil
+		case "frontend-developer":
+			return &stubACPClient{response: "frontend done"}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	if len(branchSetupMessages) != 1 {
+		t.Fatalf("branch-setup messages = %v, want exactly one prompt", branchSetupMessages)
+	}
+
+	branchPrompt := branchSetupMessages[0]
+	wantBranch := fmt.Sprintf("test-project/%s", sanitizePromptSegment(super.Logger.RunID()))
+	for _, fragment := range []string{
+		"Task: Initialize branch context based on plan.",
+		"Project name: test-project",
+		"Project slug: test-project",
+		"Suggested branch name: " + wantBranch,
+		"Plan JSON: {\"streams\":[[{\"agent\":\"frontend-developer\",\"task\":\"Build UI\"}]]}",
+	} {
+		if !strings.Contains(branchPrompt, fragment) {
+			t.Fatalf("branch-setup prompt = %q, want fragment %q", branchPrompt, fragment)
+		}
+	}
+}
+
 func TestRunPlanMarksPlannerFailedAndStopsProjectOnLaunchFailure(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)

@@ -1,1 +1,1 @@
-Create or check out the project branch (`<project-slug>/<run-id>`), ensure clean working tree, pull latest from main.
+Create or check out the project branch. Use the suggested branch name from the task prompt when provided; otherwise derive `<project-slug>/<run-id>`. Ensure the working tree is clean, fetch and base from `main`, then report the final branch name and HEAD commit.
