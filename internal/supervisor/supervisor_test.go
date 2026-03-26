@@ -235,6 +235,9 @@ func newTestAgentsRoot(t *testing.T, agentNames ...string) string {
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "cli.json"), []byte(`{"binary":"copilot","args":["--acp"]}`), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
 
 	for _, agentName := range agentNames {
 		agentDir := filepath.Join(agentsDir, agentName)

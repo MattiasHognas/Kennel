@@ -46,11 +46,12 @@ func (m *Model) startSelectedProject() tea.Cmd {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
 	project.Runtime.CancelCtx = cancel
-	project.Runtime.SupervisorDone = ctx.Done()
+	project.Runtime.SupervisorDone = runDone
 
 	eb := eventbus.NewEventBus()
-	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic), done: ctx.Done()}
+	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic), done: runDone}
 	sup := supervisor.NewSupervisor(m.repository, eb, defaultAgentsDir(), project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
 	project.Runtime.Supervisor = sup
 	project.Runtime.SupervisorEvents = source.channel
@@ -61,6 +62,7 @@ func (m *Model) startSelectedProject() tea.Cmd {
 	}
 
 	go func() {
+		defer close(runDone)
 		_ = sup.RunPlan(ctx, project.Config.Instructions, configuredAgents)
 	}()
 

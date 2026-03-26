@@ -19,8 +19,13 @@ func isUnsupportedSymlinkError(err error) bool {
 		return true
 	}
 
+	var errno syscall.Errno
+	if errors.As(err, &errno) && errno == syscall.Errno(1314) {
+		return true
+	}
+
 	var linkErr *os.LinkError
-	return errors.As(err, &linkErr) && (errors.Is(linkErr.Err, syscall.ENOTSUP) || errors.Is(linkErr.Err, syscall.ENOSYS))
+	return errors.As(err, &linkErr) && (errors.Is(linkErr.Err, syscall.ENOTSUP) || errors.Is(linkErr.Err, syscall.ENOSYS) || errors.Is(linkErr.Err, os.ErrPermission))
 }
 
 func terminalHelperCommand(t *testing.T, mode string, args ...string) (string, []string) {
