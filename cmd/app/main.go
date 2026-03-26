@@ -53,7 +53,7 @@ func initialModel() (model.Model, func()) {
 
 func sampleProjects() []model.Project {
 
-	var seedConfig = model.ProjectConfig{Name: "Testing", Workplace: "test_project", Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes"}
+	var seedConfig = model.ProjectConfig{Name: "Sample project", Workplace: "test_project", Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes and a frontend where you can cycle trough the jokes"}
 
 	projects := make([]model.Project, 0)
 	agents := make([]agent.AgentContract, 0)
