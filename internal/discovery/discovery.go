@@ -33,16 +33,13 @@ func LoadAgentDefinitions(rootDir string) ([]AgentDefinition, error) {
 
 	// Default Config
 	var defaultConfig LaunchConfig
-	defaultConfigPath := filepath.Join(agentsDir, "copilot.json")
+	defaultConfigPath := filepath.Join(agentsDir, "cli.json")
 	if data, err := os.ReadFile(defaultConfigPath); err == nil {
 		if err := json.Unmarshal(data, &defaultConfig); err != nil {
-			return nil, fmt.Errorf("parse global copilot.json: %w", err)
+			return nil, fmt.Errorf("parse cli.json: %w", err)
 		}
 	} else {
-		defaultConfig = LaunchConfig{
-			Binary: "copilot",
-			Args:   []string{"--acp"},
-		}
+		return nil, fmt.Errorf("read cli.json: %w", err)
 	}
 
 	for _, entry := range entries {

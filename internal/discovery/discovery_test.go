@@ -11,8 +11,8 @@ func TestLoadAgentDefinitions(t *testing.T) {
 	agentsDir := filepath.Join(tmp, "agents")
 	os.MkdirAll(agentsDir, 0755)
 
-	// global copilot.json
-	os.WriteFile(filepath.Join(agentsDir, "copilot.json"), []byte(`{"binary":"global-copilot"}`), 0644)
+	// global cli.json
+	os.WriteFile(filepath.Join(agentsDir, "cli.json"), []byte(`{"binary":"global-copilot"}`), 0644)
 
 	// agent 1: uses global
 	agent1Dir := filepath.Join(agentsDir, "agent1")
