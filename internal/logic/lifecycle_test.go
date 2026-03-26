@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	eventbus "MattiasHognas/Kennel/internal/events"
 	"MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
 
@@ -70,8 +71,9 @@ func TestStartSelectedProjectCommandReturnsWhenSupervisorExitsEarly(t *testing.T
 	if cmd == nil {
 		t.Fatal("expected supervisor listener command")
 	}
-	if msg := runCmdWithTimeout(t, cmd, 2*time.Second); msg != nil {
-		t.Fatalf("supervisor listener message = %#v, want nil on early supervisor exit", msg)
+	msg := runCmdWithTimeout(t, cmd, 2*time.Second)
+	if _, ok := msg.(supervisorCompletedMsg); !ok {
+		t.Fatalf("supervisor listener message = %#v, want supervisorCompletedMsg on early supervisor exit", msg)
 	}
 
 	modelAfterStart, ok := updatedModel.(Model)
@@ -247,5 +249,69 @@ func TestCompletedStatesAreNotChangedByUserControls(t *testing.T) {
 	}
 	if agentModel.projects[0].Runtime.Agents[0].State() != agent.Completed {
 		t.Fatalf("agent state after stop = %s, want %s", agentModel.projects[0].Runtime.Agents[0].State(), agent.Completed)
+	}
+}
+
+func TestProjectCompletesAutomaticallyWhenSupervisorFinishes(t *testing.T) {
+	repo := newTestRepository(t)
+
+	projectRecord, err := repo.CreateProject(context.Background(), "Auto Complete", `C:\src\auto-complete`, "do work")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	// Simulate a project that is running with a supervisor whose done channel
+	// is already closed, as if RunPlan returned successfully.
+	done := make(chan struct{})
+	close(done)
+	eventChan := make(chan eventbus.Event)
+	source := supervisorSource{
+		projectIndex: 0,
+		channel:      eventChan,
+		done:         done,
+	}
+
+	_, cancelCtx := context.WithCancel(context.Background())
+	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
+		Config: ProjectConfig{
+			ProjectID:    projectRecord.ID,
+			Name:         projectRecord.Name,
+			Workplace:    projectRecord.Workplace,
+			Instructions: projectRecord.Instructions,
+		},
+		State: ProjectState{
+			State: agent.Running,
+		},
+		Runtime: ProjectRuntime{
+			SupervisorEvents: source.channel,
+			SupervisorDone:   source.done,
+			CancelCtx:        cancelCtx,
+		},
+	}}, repo)
+
+	// The waitForSupervisorUpdate command should immediately return a
+	// supervisorCompletedMsg because the done channel is already closed.
+	completedMsg := runCmdWithTimeout(t, waitForSupervisorUpdate(source), 2*time.Second)
+	if _, ok := completedMsg.(supervisorCompletedMsg); !ok {
+		t.Fatalf("expected supervisorCompletedMsg, got %T: %#v", completedMsg, completedMsg)
+	}
+
+	// Feed the completion message into the model.
+	modelAfterComplete, _ := m.Update(completedMsg)
+	finalModel, ok := modelAfterComplete.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", modelAfterComplete)
+	}
+	if finalModel.projects[0].State.State != agent.Completed {
+		t.Fatalf("state after supervisor finish = %s, want %s", finalModel.projects[0].State.State, agent.Completed)
+	}
+
+	// Verify the completed state is persisted.
+	stored, err := repo.ReadProject(context.Background(), projectRecord.ID)
+	if err != nil {
+		t.Fatalf("read project: %v", err)
+	}
+	if stored.State != agent.Completed.String() {
+		t.Fatalf("stored project state = %q, want %q", stored.State, agent.Completed.String())
 	}
 }

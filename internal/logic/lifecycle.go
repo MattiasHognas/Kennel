@@ -112,9 +112,16 @@ func (m *Model) stopSelectedProject() {
 }
 
 func (m *Model) completeSelectedProject() {
-	projectIndex := m.selectedProjectIndex()
-	project := m.selectedProject()
-	if project == nil || project.State.State == agent.Completed {
+	m.completeProjectAtIndex(m.selectedProjectIndex())
+}
+
+func (m *Model) completeProjectAtIndex(projectIndex int) {
+	if projectIndex < 0 || projectIndex >= len(m.projects) {
+		return
+	}
+
+	project := &m.projects[projectIndex]
+	if project.State.State == agent.Completed {
 		return
 	}
 

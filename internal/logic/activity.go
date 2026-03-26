@@ -138,7 +138,7 @@ func waitForSupervisorUpdate(source supervisorSource) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case <-source.done:
-			return nil
+			return supervisorCompletedMsg{source: source}
 		case event, ok := <-source.channel:
 			if !ok {
 				return nil

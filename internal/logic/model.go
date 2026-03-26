@@ -84,6 +84,10 @@ type supervisorSyncMsg struct {
 	event  eventbus.SupervisorSyncEvent
 }
 
+type supervisorCompletedMsg struct {
+	source supervisorSource
+}
+
 type Keymap struct {
 	quit          key.Binding
 	nextTable     key.Binding
@@ -230,6 +234,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case activityMsg:
 		m.recordActivity(msg.source, msg.text)
 		return m, waitForActivity(msg.source)
+
+	case supervisorCompletedMsg:
+		if m.shouldListenForSupervisor(msg.source) {
+			m.completeProjectAtIndex(msg.source.projectIndex)
+		}
+		return m, nil
 
 	case supervisorSyncMsg:
 		if !m.shouldListenForSupervisor(msg.source) {

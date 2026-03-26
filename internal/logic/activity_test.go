@@ -151,12 +151,13 @@ func TestWaitForSupervisorUpdateStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	msg := waitForSupervisorUpdate(supervisorSource{
+	source := supervisorSource{
 		projectIndex: 0,
 		channel:      make(chan eventbus.Event),
 		done:         ctx.Done(),
-	})()
-	if msg != nil {
-		t.Fatalf("message = %#v, want nil", msg)
+	}
+	msg := waitForSupervisorUpdate(source)()
+	if _, ok := msg.(supervisorCompletedMsg); !ok {
+		t.Fatalf("message = %#v, want supervisorCompletedMsg", msg)
 	}
 }
