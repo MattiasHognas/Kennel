@@ -10,6 +10,7 @@ import (
 
 	repository "MattiasHognas/Kennel/internal/data"
 	eventbus "MattiasHognas/Kennel/internal/events"
+	logging "MattiasHognas/Kennel/internal/logging"
 	"MattiasHognas/Kennel/internal/supervisor"
 	"MattiasHognas/Kennel/internal/ui"
 	"MattiasHognas/Kennel/internal/ui/table"
@@ -39,12 +40,16 @@ type ProjectState struct {
 type ProjectRuntime struct {
 	Agents           []agent.AgentContract
 	AgentIDs         []int64
+	Plan             *supervisor.Plan
+	CollapsedStreams map[int]bool
+	Logger           *logging.ProjectLogger
 	Activities       []ActivityEntry
 	ActivityDone     <-chan struct{}
 	ActivityCancel   context.CancelFunc
 	Supervisor       *supervisor.Supervisor
 	SupervisorEvents eventbus.EventChan
 	SupervisorDone   <-chan struct{}
+	SupervisorResult <-chan error
 	CancelCtx        context.CancelFunc
 }
 
@@ -77,6 +82,7 @@ type supervisorSource struct {
 	projectIndex int
 	channel      eventbus.EventChan
 	done         <-chan struct{}
+	result       <-chan error
 }
 
 type supervisorSyncMsg struct {
@@ -84,8 +90,14 @@ type supervisorSyncMsg struct {
 	event  eventbus.SupervisorSyncEvent
 }
 
+type supervisorPlanMsg struct {
+	source supervisorSource
+	plan   string
+}
+
 type supervisorCompletedMsg struct {
 	source supervisorSource
+	err    error
 }
 
 type Keymap struct {
@@ -99,20 +111,21 @@ type Keymap struct {
 }
 
 type Model struct {
-	projectTable  table.Model
-	agentTable    table.Model
-	activityTable table.Model
-	focusedStyles table.Styles
-	blurredStyles table.Styles
-	focusIndex    int
-	projects      []Project
-	Sources       []ActivitySource
-	windowWidth   int
-	windowHeight  int
-	keymap        Keymap
-	repository    *repository.SQLiteRepository
-	mode          viewMode
-	projectEditor projectEditor
+	projectTable      table.Model
+	agentTable        table.Model
+	activityTable     table.Model
+	agentTableEntries []agentTableEntry
+	focusedStyles     table.Styles
+	blurredStyles     table.Styles
+	focusIndex        int
+	projects          []Project
+	Sources           []ActivitySource
+	windowWidth       int
+	windowHeight      int
+	keymap            Keymap
+	repository        *repository.SQLiteRepository
+	mode              viewMode
+	projectEditor     projectEditor
 }
 
 const (
@@ -203,7 +216,7 @@ func newAgentTable(width int, styles table.Styles) table.Model {
 	return table.New(
 		table.WithColumns([]table.Column{
 			{Title: "State", Width: 10},
-			{Title: "Agents", Width: max(12, width-2-12)},
+			{Title: "Plan", Width: max(12, width-2-12)},
 		}),
 		table.WithStyles(styles),
 		table.WithWidth(width),
@@ -237,6 +250,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case supervisorCompletedMsg:
 		if m.shouldListenForSupervisor(msg.source) {
+			if msg.err != nil {
+				activitySources := m.failProjectAtIndex(msg.source.projectIndex)
+				cmds := make([]tea.Cmd, 0, len(activitySources))
+				for _, source := range activitySources {
+					cmds = append(cmds, waitForActivity(source))
+				}
+				return m, tea.Batch(cmds...)
+			}
 			m.completeProjectAtIndex(msg.source.projectIndex)
 		}
 		return m, nil
@@ -258,6 +279,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, waitForActivity(source))
 		}
 		return m, tea.Batch(cmds...)
+
+	case supervisorPlanMsg:
+		if !m.shouldListenForSupervisor(msg.source) {
+			return m, nil
+		}
+		m.applySupervisorPlan(msg.source, msg.plan)
+		return m, waitForSupervisorUpdate(msg.source)
 	}
 
 	if m.mode == projectEditorViewMode {
@@ -278,7 +306,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateTables(msg tea.Msg) (tea.Model, tea.Cmd) {
 	previousProject := m.selectedProjectIndex()
-	previousAgent := m.agentTable.Cursor()
+	previousSelection := m.selectedAgentTableEntry()
 
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
@@ -291,12 +319,9 @@ func (m Model) updateTables(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmds = append(cmds, cmd)
 
 	if m.selectedProjectIndex() != previousProject {
-		m.refreshSelectedProjectTables()
-		if project := m.selectedProject(); project != nil && len(project.Runtime.Agents) > 0 {
-			m.agentTable.SetCursor(min(previousAgent, len(project.Runtime.Agents)-1))
-		} else {
-			m.agentTable.SetCursor(0)
-		}
+		m.refreshSelectedProjectTablesForEntry(previousSelection)
+	} else if m.focusIndex == 1 {
+		m.ensurePlanTableCursor()
 	}
 
 	return m, tea.Batch(cmds...)
@@ -319,7 +344,7 @@ func (m Model) View() tea.View {
 		"",
 		lipgloss.JoinHorizontal(lipgloss.Top, m.tableViews()...),
 		"",
-		"tab/shift+tab switches tables, enter edits the selected project, space cycles state, s starts, p stops.",
+		"tab/shift+tab switches tables, enter edits the selected project or toggles the selected stream, space cycles state, s starts, p stops.",
 		"Activities come from agents and supervisor updates for the currently selected project.",
 	)
 
@@ -364,7 +389,7 @@ func (m *Model) ResizeTables(width, height int) {
 	m.agentTable.SetHeight(tableHeight)
 	m.agentTable.SetColumns([]table.Column{
 		{Title: "State", Width: 10},
-		{Title: "Agents", Width: max(12, agentWidth-2-12)},
+		{Title: "Plan", Width: max(12, agentWidth-2-12)},
 	})
 
 	m.activityTable.SetWidth(activityWidth)
@@ -391,8 +416,10 @@ func (m *Model) SetFocus(index int) {
 		m.projectTable.SetStyles(m.focusedStyles)
 		m.projectTable.Focus()
 	case 1:
+		m.refreshSelectedProjectTables()
 		m.agentTable.SetStyles(m.focusedStyles)
 		m.agentTable.Focus()
+		m.ensurePlanTableCursor()
 	default:
 		m.activityTable.SetStyles(m.focusedStyles)
 		m.activityTable.Focus()
@@ -409,27 +436,35 @@ func (m *Model) refreshProjectTable() {
 }
 
 func (m *Model) refreshSelectedProjectTables() {
+	m.refreshSelectedProjectTablesForEntry(m.selectedAgentTableEntry())
+}
+
+func (m *Model) refreshSelectedProjectTablesForEntry(selectedEntry agentTableEntry) {
 	if m.isCreateProjectSelected() {
+		m.agentTableEntries = []agentTableEntry{{Kind: planRowNone, AgentIndex: nonSelectableAgentIndex, StreamIndex: -1}}
 		m.agentTable.SetRows([]table.Row{{"", ""}})
 		m.activityTable.SetRows([]table.Row{{"", ""}})
+		m.agentTable.SetCursor(0)
 		return
 	}
 
 	project := m.selectedProject()
 	if project == nil {
+		m.agentTableEntries = []agentTableEntry{{Kind: planRowNone, AgentIndex: nonSelectableAgentIndex, StreamIndex: -1}}
 		m.agentTable.SetRows([]table.Row{{"", ""}})
 		m.activityTable.SetRows([]table.Row{{"", ""}})
+		m.agentTable.SetCursor(0)
 		return
 	}
 
-	agentRows := make([]table.Row, 0, len(project.Runtime.Agents))
-	for _, agentInstance := range project.Runtime.Agents {
-		agentRows = append(agentRows, table.Row{agentInstance.State().String(), agentInstance.Name()})
-	}
+	agentRows, agentEntries := buildAgentTableRows(project.Runtime.Agents, project.Runtime.Plan, project.Runtime.CollapsedStreams)
 	if len(agentRows) == 0 {
-		agentRows = append(agentRows, table.Row{"-", "No agents"})
+		agentRows = append(agentRows, table.Row{"-", "No plan yet"})
+		agentEntries = []agentTableEntry{{Kind: planRowNone, AgentIndex: nonSelectableAgentIndex, StreamIndex: -1}}
 	}
+	m.agentTableEntries = agentEntries
 	m.agentTable.SetRows(agentRows)
+	m.setAgentTableCursorForEntry(selectedEntry)
 
 	activityRows := make([]table.Row, 0, len(project.Runtime.Activities))
 	for i := len(project.Runtime.Activities) - 1; i >= 0; i-- {
@@ -493,11 +528,34 @@ func (m *Model) selectedAgentIndex() int {
 	if project == nil || len(project.Runtime.Agents) == 0 {
 		return -1
 	}
-	index := m.agentTable.Cursor()
-	if index < 0 || index >= len(project.Runtime.Agents) {
+
+	rowIndex := m.agentTable.Cursor()
+	if rowIndex < 0 {
 		return -1
 	}
-	return index
+	if rowIndex < len(m.agentTableEntries) {
+		entry := m.agentTableEntries[rowIndex]
+		if entry.Kind == planRowAgent {
+			agentIndex := entry.AgentIndex
+			if agentIndex >= 0 && agentIndex < len(project.Runtime.Agents) {
+				return agentIndex
+			}
+		}
+	}
+	if rowIndex < len(project.Runtime.Agents) && m.selectableAgentRowCount() == 0 {
+		return rowIndex
+	}
+	return -1
+}
+
+func (m *Model) selectableAgentRowCount() int {
+	count := 0
+	for _, entry := range m.agentTableEntries {
+		if entry.Kind == planRowAgent && entry.AgentIndex != nonSelectableAgentIndex {
+			count++
+		}
+	}
+	return count
 }
 
 func (m *Model) selectedAgent() agent.AgentContract {
@@ -507,6 +565,29 @@ func (m *Model) selectedAgent() agent.AgentContract {
 		return nil
 	}
 	return project.Runtime.Agents[index]
+}
+
+func (m *Model) selectedStreamIndex() int {
+	entry := m.selectedAgentTableEntry()
+	if entry.Kind != planRowStream {
+		return -1
+	}
+	return entry.StreamIndex
+}
+
+func (m *Model) toggleSelectedStreamCollapsed() bool {
+	project := m.selectedProject()
+	streamIndex := m.selectedStreamIndex()
+	if project == nil || project.Runtime.Plan == nil || streamIndex < 0 || streamIndex >= len(project.Runtime.Plan.Streams) {
+		return false
+	}
+	if project.Runtime.CollapsedStreams == nil {
+		project.Runtime.CollapsedStreams = make(map[int]bool)
+	}
+
+	project.Runtime.CollapsedStreams[streamIndex] = !project.Runtime.CollapsedStreams[streamIndex]
+	m.refreshSelectedProjectTablesForEntry(agentTableEntry{Kind: planRowStream, AgentIndex: nonSelectableAgentIndex, StreamIndex: streamIndex})
+	return true
 }
 
 func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bool, cmd tea.Cmd) {
@@ -522,6 +603,9 @@ func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bo
 	case key.Matches(msg, m.keymap.editProject):
 		if m.focusIndex == 0 {
 			return false, true, m.openSelectedProjectEditor()
+		}
+		if m.focusIndex == 1 && m.toggleSelectedStreamCollapsed() {
+			return false, true, nil
 		}
 		return false, false, nil
 	case key.Matches(msg, m.keymap.startProject):
@@ -556,13 +640,21 @@ func parseAgentState(state string) agent.AgentState {
 		return agent.Running
 	case agent.Completed.String():
 		return agent.Completed
+	case agent.Failed.String():
+		return agent.Failed
 	default:
 		return agent.Stopped
 	}
 }
 
 func (m *Model) persistProjectState(project *Project) {
-	if m.repository == nil || project == nil || project.Config.ProjectID <= 0 {
+	if project == nil {
+		return
+	}
+	if logger := m.ensureProjectLogger(project); logger != nil {
+		logger.LogProject("PROJECT_STATE", project.State.State.String())
+	}
+	if m.repository == nil || project.Config.ProjectID <= 0 {
 		return
 	}
 
@@ -572,7 +664,15 @@ func (m *Model) persistProjectState(project *Project) {
 }
 
 func (m *Model) persistProjectAgentStates(project *Project) {
-	if m.repository == nil || project == nil || len(project.Runtime.AgentIDs) == 0 {
+	if project == nil {
+		return
+	}
+	if logger := m.ensureProjectLogger(project); logger != nil {
+		for _, agentInstance := range project.Runtime.Agents {
+			logger.LogAgentState(agentInstance.Name(), agentInstance.State().String())
+		}
+	}
+	if m.repository == nil || len(project.Runtime.AgentIDs) == 0 {
 		return
 	}
 
@@ -588,7 +688,17 @@ func (m *Model) persistProjectAgentStates(project *Project) {
 }
 
 func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
-	if m.repository == nil || project == nil || project.Config.ProjectID <= 0 {
+	if project == nil {
+		return
+	}
+	if logger := m.ensureProjectLogger(project); logger != nil {
+		if agentIndex >= 0 && agentIndex < len(project.Runtime.Agents) {
+			logger.LogAgentActivity(project.Runtime.Agents[agentIndex].Name(), text)
+		} else {
+			logger.LogProject("ACTIVITY", text)
+		}
+	}
+	if m.repository == nil || project.Config.ProjectID <= 0 {
 		return
 	}
 
@@ -600,6 +710,16 @@ func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
 	if _, err := m.repository.NewActivity(context.Background(), project.Config.ProjectID, agentID, text); err != nil {
 		fmt.Fprintf(os.Stderr, "persist activity: %v\n", err)
 	}
+}
+
+func (m *Model) ensureProjectLogger(project *Project) *logging.ProjectLogger {
+	if project == nil {
+		return nil
+	}
+	if project.Runtime.Logger == nil {
+		project.Runtime.Logger = logging.NewProjectLogger(defaultAgentsDir(), project.Config.ProjectID, project.Config.Name)
+	}
+	return project.Runtime.Logger
 }
 
 func (m *Model) shouldListenForSupervisor(source supervisorSource) bool {
@@ -660,6 +780,9 @@ func (m *Model) applySupervisorSync(source supervisorSource, syncEvent eventbus.
 	if state == agent.Running && project.State.State == agent.Stopped {
 		project.State.State = agent.Running
 	}
+	if state == agent.Failed {
+		project.State.State = agent.Stopped
+	}
 
 	if activity := strings.TrimSpace(syncEvent.Activity); activity != "" && agentIndex >= 0 {
 		project.Runtime.Activities = append(project.Runtime.Activities, ActivityEntry{
@@ -670,6 +793,21 @@ func (m *Model) applySupervisorSync(source supervisorSource, syncEvent eventbus.
 
 	m.refreshProjectAndSelection(source.projectIndex)
 	return activitySources
+}
+
+func (m *Model) applySupervisorPlan(source supervisorSource, planOutput string) {
+	if source.projectIndex < 0 || source.projectIndex >= len(m.projects) {
+		return
+	}
+
+	plan, err := supervisor.ParsePlanOutput(planOutput)
+	if err != nil {
+		return
+	}
+
+	m.projects[source.projectIndex].Runtime.Plan = &plan
+	m.projects[source.projectIndex].Runtime.CollapsedStreams = map[int]bool{}
+	m.refreshProjectAndSelection(source.projectIndex)
 }
 
 func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
@@ -694,7 +832,9 @@ func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 	preservedSupervisor := project.Runtime.Supervisor
 	preservedSupervisorEvents := project.Runtime.SupervisorEvents
 	preservedSupervisorDone := project.Runtime.SupervisorDone
+	preservedSupervisorResult := project.Runtime.SupervisorResult
 	preservedCancel := project.Runtime.CancelCtx
+	preservedLogger := project.Runtime.Logger
 
 	agents := make([]agent.AgentContract, 0, len(storedProject.Agents))
 	agentIDs := make([]int64, 0, len(storedProject.Agents))
@@ -718,10 +858,14 @@ func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 	project.Runtime = ProjectRuntime{
 		Agents:           agents,
 		AgentIDs:         agentIDs,
+		Plan:             RestorePlanFromStoredAgents(storedProject.Agents),
+		CollapsedStreams: map[int]bool{},
+		Logger:           preservedLogger,
 		Activities:       activities,
 		Supervisor:       preservedSupervisor,
 		SupervisorEvents: preservedSupervisorEvents,
 		SupervisorDone:   preservedSupervisorDone,
+		SupervisorResult: preservedSupervisorResult,
 		CancelCtx:        preservedCancel,
 	}
 	sources := m.resetActivitySourcesForProject(projectIndex)

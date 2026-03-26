@@ -321,6 +321,19 @@ func TestBuildMCPServersMapsTransportsAndMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildMCPServersReturnsEmptyArrayForMissingConfig(t *testing.T) {
+	servers, err := buildMCPServers(nil)
+	if err != nil {
+		t.Fatalf("buildMCPServers returned error: %v", err)
+	}
+	if servers == nil {
+		t.Fatal("buildMCPServers returned nil slice, want empty slice")
+	}
+	if len(servers) != 0 {
+		t.Fatalf("server count = %d, want 0", len(servers))
+	}
+}
+
 func TestCreateTerminalBlocksWhenACPToolIsDisabled(t *testing.T) {
 	client := &localClient{
 		workplace: t.TempDir(),

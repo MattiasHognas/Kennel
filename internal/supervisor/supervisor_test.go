@@ -2,6 +2,7 @@ package supervisor_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +18,15 @@ import (
 type stubACPClient struct {
 	response string
 	messages *[]string
+	err      error
 }
 
 func (c *stubACPClient) Prompt(ctx context.Context, msg string) (string, error) {
 	if c.messages != nil {
 		*c.messages = append(*c.messages, msg)
+	}
+	if c.err != nil {
+		return "", c.err
 	}
 	return c.response, nil
 }
@@ -246,6 +251,40 @@ func TestRunPlanOmitsPreviousOutputWhenAgentDisablesPromptContext(t *testing.T) 
 	}
 	if testerMessages[0] != "Task: Run focused tests" {
 		t.Fatalf("tester prompt = %q, want task-only prompt", testerMessages[0])
+	}
+}
+
+func TestRunPlanMarksPlannerFailedAndStopsProjectOnLaunchFailure(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t)
+	eb := eventbus.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+		if topic != "planner" {
+			t.Fatalf("unexpected ACP topic %q", topic)
+		}
+		return &stubACPClient{err: fmt.Errorf("planner launch failed")}, nil
+	}
+
+	err := super.RunPlan(context.Background(), "ship it", nil)
+	if err == nil {
+		t.Fatal("RunPlan returned nil error, want planner failure")
+	}
+
+	stored, readErr := repo.ReadProject(context.Background(), project.ID)
+	if readErr != nil {
+		t.Fatalf("ReadProject returned error: %v", readErr)
+	}
+	if stored.State != "stopped" {
+		t.Fatalf("project state = %q, want stopped", stored.State)
+	}
+	assertAgentState(t, stored.Agents, "planner", "failed", "")
+	assertActivityContains(t, stored.Activities, "planner: failed: planner launch failed")
+	if len(tracking.checkpoints) == 0 || tracking.checkpoints[len(tracking.checkpoints)-1] != "planning_failed" {
+		t.Fatalf("checkpoint statuses = %v, want planning_failed", tracking.checkpoints)
 	}
 }
 

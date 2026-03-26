@@ -14,6 +14,7 @@ import (
 
 	"MattiasHognas/Kennel/internal/discovery"
 	eventbus "MattiasHognas/Kennel/internal/events"
+	logging "MattiasHognas/Kennel/internal/logging"
 
 	"github.com/coder/acp-go-sdk"
 )
@@ -40,6 +41,7 @@ type Wrapper struct {
 	eb      *eventbus.EventBus
 	topic   string
 	session acp.SessionId
+	logger  *logging.ProjectLogger
 }
 
 func NewWrapper(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (*Wrapper, error) {
@@ -133,6 +135,9 @@ func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
 	// Block and aggregate chunks until the agent finishes processing
 	for chunk := range textChan {
 		sb.WriteString(chunk)
+		if w.logger != nil && strings.TrimSpace(chunk) != "" {
+			w.logger.LogAgentEvent(w.topic, "OUTPUT_CHUNK", chunk)
+		}
 	}
 
 	err := <-errChan
@@ -184,7 +189,7 @@ func appendCommandEnv(overrides map[string]string) []string {
 
 func buildMCPServers(configs []discovery.MCPServer) ([]acp.McpServer, error) {
 	if len(configs) == 0 {
-		return nil, nil
+		return []acp.McpServer{}, nil
 	}
 
 	servers := make([]acp.McpServer, 0, len(configs))
@@ -269,12 +274,20 @@ type terminalState struct {
 	done     chan struct{}
 	waitErr  error
 	exitCode *int
+	logger   *logging.ProjectLogger
+	agent    string
 }
 
 func (t *terminalState) Write(p []byte) (n int, err error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.buf.Write(p)
+	n, err = t.buf.Write(p)
+	t.mu.Unlock()
+
+	if t.logger != nil && len(p) > 0 {
+		t.logger.LogAgentEvent(t.agent, "TERMINAL_OUTPUT", string(p))
+	}
+
+	return n, err
 }
 
 func (t *terminalState) ReadAndClear() string {
@@ -294,6 +307,16 @@ func (t *terminalState) recordExit(waitErr error) {
 		exitCode := t.cmd.ProcessState.ExitCode()
 		t.exitCode = &exitCode
 	}
+	if t.logger != nil {
+		message := "terminal completed"
+		if t.exitCode != nil {
+			message = fmt.Sprintf("terminal exit code=%d", *t.exitCode)
+		}
+		if waitErr != nil {
+			message = fmt.Sprintf("terminal error=%v", waitErr)
+		}
+		t.logger.LogAgentEvent(t.agent, "TERMINAL_EXIT", message)
+	}
 	close(t.done)
 }
 
@@ -310,9 +333,17 @@ type localClient struct {
 	workplace   string
 	textChan    chan string
 	permissions discovery.PermissionsConfig
+	logger      *logging.ProjectLogger
 
 	terminalsMu sync.Mutex
 	terminals   map[string]*terminalState
+}
+
+func (w *Wrapper) SetLogger(logger *logging.ProjectLogger) {
+	w.logger = logger
+	if w.handler != nil {
+		w.handler.logger = logger
+	}
 }
 
 func (c *localClient) SessionUpdate(ctx context.Context, params acp.SessionNotification) error {
@@ -480,12 +511,16 @@ func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTermi
 	}
 	terminalCmd := exec.Command(params.Command, params.Args...)
 	terminalCmd.Dir = c.workplace
-	state := &terminalState{cmd: terminalCmd, done: make(chan struct{})}
+	state := &terminalState{cmd: terminalCmd, done: make(chan struct{}), logger: c.logger, agent: c.topic}
 	terminalCmd.Stdout = state
 	terminalCmd.Stderr = state
 	err = terminalCmd.Start()
 	if err != nil {
 		return acp.CreateTerminalResponse{}, fmt.Errorf("failed to start terminal command: %w", err)
+	}
+	if c.logger != nil {
+		commandLine := strings.TrimSpace(strings.Join(append([]string{params.Command}, params.Args...), " "))
+		c.logger.LogAgentEvent(c.topic, "TERMINAL_START", commandLine)
 	}
 	termID := fmt.Sprintf("%d", terminalCmd.Process.Pid)
 	c.terminalsMu.Lock()

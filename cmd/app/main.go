@@ -132,6 +132,7 @@ func loadProjects(repository *repository.SQLiteRepository) []model.Project {
 			Runtime: model.ProjectRuntime{
 				Agents:     agents,
 				AgentIDs:   agentIDs,
+				Plan:       model.RestorePlanFromStoredAgents(storedProject.Agents),
 				Activities: activities,
 			},
 		})
@@ -187,6 +188,8 @@ func restoreState(persistedState string) agent.AgentState {
 		return agent.Running
 	case agent.Completed.String():
 		return agent.Completed
+	case agent.Failed.String():
+		return agent.Failed
 	default:
 		return agent.Stopped
 	}

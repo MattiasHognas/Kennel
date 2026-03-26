@@ -567,7 +567,7 @@ func (r *SQLiteRepository) ensureSchema(ctx context.Context) error {
 func normalizeState(state string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(state))
 	switch trimmed {
-	case "running", "stopped", "completed":
+	case "running", "stopped", "completed", "failed":
 		return trimmed
 	default:
 		return "stopped"

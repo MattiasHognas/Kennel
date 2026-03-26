@@ -15,6 +15,7 @@ import (
 	repository "MattiasHognas/Kennel/internal/data"
 	"MattiasHognas/Kennel/internal/discovery"
 	eventbus "MattiasHognas/Kennel/internal/events"
+	logging "MattiasHognas/Kennel/internal/logging"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -30,6 +31,10 @@ type Plan struct {
 	Streams []TaskStream `json:"streams"`
 }
 
+func ParsePlanOutput(output string) (Plan, error) {
+	return parsePlanJSON(extractPlanJSON(output))
+}
+
 const (
 	branchSetupAgentName    = "branch-setup"
 	plannerAgentName        = "planner"
@@ -43,6 +48,7 @@ type Repository interface {
 	ReadProject(ctx context.Context, projectID int64) (repository.Project, error)
 	UpdateAgentOutput(ctx context.Context, agentID int64, output string) error
 	UpdateAgentState(ctx context.Context, agentID int64, state string) error
+	UpdateProjectState(ctx context.Context, projectID int64, state string) error
 }
 
 type ACPClient interface {
@@ -64,6 +70,7 @@ type Supervisor struct {
 	ProjectName string
 	Workplace   string
 	AcpFactory  ACPFactory
+	Logger      *logging.ProjectLogger
 }
 
 func NewSupervisor(repo Repository, eb *eventbus.EventBus, agentsDir string, projectID int64, projectName string, workplace string) *Supervisor {
@@ -75,10 +82,15 @@ func NewSupervisor(repo Repository, eb *eventbus.EventBus, agentsDir string, pro
 		ProjectName: projectName,
 		Workplace:   workplace,
 		AcpFactory:  DefaultACPFactory,
+		Logger:      logging.NewProjectLogger(agentsDir, projectID, projectName),
 	}
 }
 
 func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configuredAgents []string) error {
+	if s.Logger != nil {
+		s.Logger.LogProject("PROJECT_START", fmt.Sprintf("workplace=%s\nconfiguredAgents=%s", s.Workplace, strings.Join(configuredAgents, ", ")))
+	}
+
 	proj, err := s.Repo.ReadProject(ctx, s.ProjectID)
 	if err != nil {
 		return s.failStop(ctx, 0, "read_project_failed", err)
@@ -118,20 +130,22 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 			return s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("add agent %s: %w", plannerTask.Agent, err))
 		}
 		agentStateMap[plannerTask.Agent] = plannerRec
+		s.logAgentCreated(plannerRec.Name)
 		s.publishSync(plannerRec, plannerRec.State, "")
 	}
 
 	if plannerRec.State != "completed" {
 		if err := s.markAgentRunning(ctx, plannerRec, plannerTask.Task); err != nil {
-			return s.failStop(ctx, 0, "planning_failed", err)
+			return s.failAgentAndStop(ctx, plannerRec, 0, "planning_failed", err)
 		}
 		plannerRec.State = "running"
 		agentStateMap[plannerTask.Agent] = plannerRec
 
 		plannerWrapper, err := s.AcpFactory(ctx, plannerDef, s.EventBus, s.Workplace, "planner")
 		if err != nil {
-			return s.failStop(ctx, 0, "planning_launch_failed", err)
+			return s.failAgentAndStop(ctx, plannerRec, 0, "planning_launch_failed", err)
 		}
+		s.attachACPLogger(plannerWrapper)
 		defer plannerWrapper.Close()
 
 		planPrompt := fmt.Sprintf(`Create an execution plan based on these instructions: %s
@@ -142,42 +156,35 @@ Use only these exact agent names for plan tasks: %v
 Do not use planner, branch-setup, supervisor, or general_purpose unless they appear exactly in the allowed list.
 		Ensure the response is purely the JSON or embedded in a Markdown block.`, instructions, planningAgents)
 
+		s.logAgentInput(plannerTask.Agent, planPrompt)
 		planOutput, err = plannerWrapper.Prompt(ctx, planPrompt)
 		if err != nil {
-			return s.failStop(ctx, 0, "planning_failed", err)
+			return s.failAgentAndStop(ctx, plannerRec, 0, "planning_failed", err)
 		}
+		s.logAgentOutput(plannerTask.Agent, planOutput)
 	} else {
 		planOutput = plannerRec.Output
+		s.logAgentActivity(plannerTask.Agent, "reused completed output")
 	}
 
-	rawJSON := planOutput
-	jsonBlockRegex := regexp.MustCompile("(?s)```(?:json)?\n(.*?)\n```")
-	if matches := jsonBlockRegex.FindStringSubmatch(rawJSON); len(matches) > 1 {
-		rawJSON = matches[1]
-	} else {
-		start := strings.Index(rawJSON, "{")
-		end := strings.LastIndex(rawJSON, "}")
-		if start != -1 && end != -1 && end > start {
-			rawJSON = rawJSON[start : end+1]
-		}
-	}
-
-	var plan Plan
-	if err := json.Unmarshal([]byte(rawJSON), &plan); err != nil {
-		return s.failStop(ctx, 0, "planning_json_parse_failed", err)
+	rawJSON := extractPlanJSON(planOutput)
+	plan, err := parsePlanJSON(rawJSON)
+	if err != nil {
+		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_json_parse_failed", err)
 	}
 
 	if err := normalizePlan(&plan); err != nil {
-		return s.failStop(ctx, 0, "planning_validation_failed", err)
+		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
 	}
 
 	if err := resolvePlanAgents(&plan, agentMap); err != nil {
-		return s.failStop(ctx, 0, "planning_validation_failed", err)
+		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
 	}
 
 	if err := s.ensurePlanAgents(ctx, plan, agentMap, agentStateMap); err != nil {
-		return s.failStop(ctx, 0, "planning_validation_failed", err)
+		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
 	}
+	s.publishPlan(plan)
 
 	if plannerRec.State != "completed" {
 		if err := s.completeAgent(ctx, agentStateMap[plannerAgentName], planOutput); err != nil {
@@ -201,21 +208,25 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 
 	if branchSetupRec.State != "completed" {
 		if err := s.markAgentRunning(ctx, branchSetupRec, branchSetupTask.Task); err != nil {
-			return s.failStop(ctx, 1, "execution_failed", err)
+			return s.failAgentAndStop(ctx, branchSetupRec, 1, "execution_failed", err)
 		}
 		branchSetupRec.State = "running"
 		agentStateMap[branchSetupTask.Agent] = branchSetupRec
 
 		setupWrapper, err := s.AcpFactory(ctx, branchSetupDef, s.EventBus, s.Workplace, branchSetupTask.Agent)
 		if err != nil {
-			return s.failStop(ctx, 1, "launch_failed", err)
+			return s.failAgentAndStop(ctx, branchSetupRec, 1, "launch_failed", err)
 		}
+		s.attachACPLogger(setupWrapper)
 
-		setupOut, err = setupWrapper.Prompt(ctx, buildTaskPrompt(branchSetupTask.Task, rawJSON, branchSetupDef.PromptContext.PreviousOutput))
+		setupPrompt := buildTaskPrompt(branchSetupTask.Task, rawJSON, branchSetupDef.PromptContext.PreviousOutput)
+		s.logAgentInput(branchSetupTask.Agent, setupPrompt)
+		setupOut, err = setupWrapper.Prompt(ctx, setupPrompt)
 		setupWrapper.Close()
 		if err != nil {
-			return s.failStop(ctx, 1, "execution_failed", err)
+			return s.failAgentAndStop(ctx, branchSetupRec, 1, "execution_failed", err)
 		}
+		s.logAgentOutput(branchSetupTask.Agent, setupOut)
 
 		if err := s.completeAgent(ctx, agentStateMap[branchSetupAgentName], setupOut); err != nil {
 			log.Printf("Failed to persist branch setup completion: %v", err)
@@ -227,6 +238,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		}
 	} else {
 		setupOut = branchSetupRec.Output
+		s.logAgentActivity(branchSetupTask.Agent, "reused completed output")
 	}
 
 	if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, 1, "completed", setupOut); saveErr != nil {
@@ -257,10 +269,14 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 
 				if agentRec.State == "completed" {
 					currentPrompt = agentRec.Output
+					s.logAgentActivity(step.Agent, "reused completed output")
 					continue
 				}
 
 				if err := s.markAgentRunning(gCtx, agentRec, step.Task); err != nil {
+					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
+						log.Printf("Failed to persist agent failure: %v", failErr)
+					}
 					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
 				}
 				agentRec.State = "running"
@@ -270,15 +286,24 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 
 				wrapper, err := s.AcpFactory(gCtx, def, s.EventBus, s.Workplace, step.Agent)
 				if err != nil {
+					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
+						log.Printf("Failed to persist agent failure: %v", failErr)
+					}
 					return fmt.Errorf("launch_failed for %s: %w", step.Agent, err)
 				}
+				s.attachACPLogger(wrapper)
 
 				promptContext := buildTaskPrompt(step.Task, currentPrompt, def.PromptContext.PreviousOutput)
+				s.logAgentInput(step.Agent, promptContext)
 				out, err := wrapper.Prompt(gCtx, promptContext)
 				if err != nil {
 					wrapper.Close()
+					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
+						log.Printf("Failed to persist agent failure: %v", failErr)
+					}
 					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
 				}
+				s.logAgentOutput(step.Agent, out)
 
 				wrapper.Close()
 				currentPrompt = out
@@ -305,6 +330,10 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		return s.failStop(ctx, -1, "stream_execution_failed", err)
 	}
 
+	if s.Logger != nil {
+		s.Logger.LogProject("PROJECT_COMPLETE", "supervisor run completed")
+	}
+
 	return nil
 }
 
@@ -329,7 +358,7 @@ func normalizePlan(plan *Plan) error {
 func resolvePlanAgents(plan *Plan, agentMap map[string]discovery.AgentDefinition) error {
 	aliases := make(map[string]string, len(agentMap))
 	for name := range agentMap {
-		canonicalName := canonicalAgentName(name)
+		canonicalName := CanonicalAgentName(name)
 		if canonicalName == "" {
 			continue
 		}
@@ -341,7 +370,7 @@ func resolvePlanAgents(plan *Plan, agentMap map[string]discovery.AgentDefinition
 
 	for streamIdx := range plan.Streams {
 		for taskIdx := range plan.Streams[streamIdx] {
-			resolvedName, ok := aliases[canonicalAgentName(plan.Streams[streamIdx][taskIdx].Agent)]
+			resolvedName, ok := aliases[CanonicalAgentName(plan.Streams[streamIdx][taskIdx].Agent)]
 			if !ok {
 				return fmt.Errorf("agent %s not found", plan.Streams[streamIdx][taskIdx].Agent)
 			}
@@ -352,7 +381,7 @@ func resolvePlanAgents(plan *Plan, agentMap map[string]discovery.AgentDefinition
 	return nil
 }
 
-func canonicalAgentName(name string) string {
+func CanonicalAgentName(name string) string {
 	replacer := strings.NewReplacer("-", " ", "_", " ")
 	parts := strings.Fields(replacer.Replace(strings.ToLower(strings.TrimSpace(name))))
 	return strings.Join(parts, "-")
@@ -393,9 +422,9 @@ func availablePlanningAgents(agentMap map[string]discovery.AgentDefinition, conf
 	}
 
 	for _, name := range configuredAgents {
-		canonicalName := canonicalAgentName(name)
+		canonicalName := CanonicalAgentName(name)
 		for agentName := range agentMap {
-			if canonicalAgentName(agentName) == canonicalName {
+			if CanonicalAgentName(agentName) == canonicalName {
 				add(agentName)
 				break
 			}
@@ -429,6 +458,7 @@ func (s *Supervisor) ensurePlanAgents(ctx context.Context, plan Plan, agentMap m
 			return fmt.Errorf("add agent %s: %w", agentName, err)
 		}
 		agentStateMap[agentName] = agentRec
+		s.logAgentCreated(agentName)
 		s.publishSync(agentRec, agentRec.State, "")
 	}
 
@@ -470,8 +500,26 @@ func (s *Supervisor) completeAgent(ctx context.Context, agent repository.Agent, 
 	if err := s.Repo.UpdateAgentState(ctx, agent.ID, "completed"); err != nil {
 		return err
 	}
+	s.logAgentState(agent.Name, "completed")
 	s.recordAgentActivity(ctx, agent, "completed")
 	s.publishSync(agent, "completed", "completed")
+
+	return nil
+}
+
+func (s *Supervisor) markAgentFailed(ctx context.Context, agent repository.Agent, cause error) error {
+	if err := s.Repo.UpdateAgentState(ctx, agent.ID, "failed"); err != nil {
+		return err
+	}
+
+	activity := "failed"
+	if cause != nil {
+		activity = fmt.Sprintf("failed: %v", cause)
+	}
+
+	s.logAgentState(agent.Name, "failed")
+	s.recordAgentActivity(ctx, agent, activity)
+	s.publishSync(agent, "failed", activity)
 
 	return nil
 }
@@ -480,6 +528,7 @@ func (s *Supervisor) markAgentRunning(ctx context.Context, agent repository.Agen
 	if err := s.Repo.UpdateAgentState(ctx, agent.ID, "running"); err != nil {
 		return err
 	}
+	s.logAgentState(agent.Name, "running")
 	s.recordAgentActivity(ctx, agent, activity)
 	s.publishSync(agent, "running", activity)
 
@@ -491,6 +540,7 @@ func (s *Supervisor) recordAgentActivity(ctx context.Context, agent repository.A
 	if s.Repo == nil || activity == "" {
 		return
 	}
+	s.logAgentActivity(agent.Name, activity)
 
 	if _, err := s.Repo.NewActivity(ctx, s.ProjectID, sql.NullInt64{Int64: agent.ID, Valid: agent.ID > 0}, fmt.Sprintf("%s: %s", agent.Name, activity)); err != nil {
 		log.Printf("Failed to persist activity: %v", err)
@@ -511,9 +561,104 @@ func (s *Supervisor) publishSync(agent repository.Agent, state, activity string)
 	}})
 }
 
+func (s *Supervisor) publishPlan(plan Plan) {
+	if s.EventBus == nil {
+		return
+	}
+
+	encodedPlan, err := json.Marshal(plan)
+	if err != nil {
+		log.Printf("Failed to marshal plan update: %v", err)
+		return
+	}
+
+	s.EventBus.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.PlanUpdateEvent{Plan: string(encodedPlan)}})
+}
+
+func extractPlanJSON(output string) string {
+	rawJSON := output
+	jsonBlockRegex := regexp.MustCompile("(?s)```(?:json)?\n(.*?)\n```")
+	if matches := jsonBlockRegex.FindStringSubmatch(rawJSON); len(matches) > 1 {
+		return matches[1]
+	}
+
+	start := strings.Index(rawJSON, "{")
+	end := strings.LastIndex(rawJSON, "}")
+	if start != -1 && end != -1 && end > start {
+		return rawJSON[start : end+1]
+	}
+
+	return rawJSON
+}
+
+func parsePlanJSON(rawJSON string) (Plan, error) {
+	var plan Plan
+	if err := json.Unmarshal([]byte(rawJSON), &plan); err != nil {
+		return Plan{}, err
+	}
+	return plan, nil
+}
+
 func (s *Supervisor) failStop(ctx context.Context, stepIndex int, status string, originalErr error) error {
+	if s.Repo != nil {
+		if err := s.Repo.UpdateProjectState(ctx, s.ProjectID, "stopped"); err != nil {
+			log.Printf("Failed to persist stopped project state: %v", err)
+		}
+	}
+	if s.Logger != nil {
+		s.Logger.LogProject("PROJECT_STATE", "stopped")
+	}
+	if s.Logger != nil {
+		s.Logger.LogProject("PROJECT_ERROR", fmt.Sprintf("step=%d\nstatus=%s\nerror=%v", stepIndex, status, originalErr))
+	}
 	if s.Repo != nil {
 		_ = s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, stepIndex, status, originalErr.Error())
 	}
 	return fmt.Errorf("fail-stop at step %d: %w", stepIndex, originalErr)
+}
+
+func (s *Supervisor) failAgentAndStop(ctx context.Context, agent repository.Agent, stepIndex int, status string, originalErr error) error {
+	if err := s.markAgentFailed(ctx, agent, originalErr); err != nil {
+		log.Printf("Failed to persist agent failure: %v", err)
+	}
+	return s.failStop(ctx, stepIndex, status, originalErr)
+}
+
+func (s *Supervisor) logAgentCreated(agentName string) {
+	if s.Logger != nil {
+		s.Logger.LogAgentCreated(agentName)
+	}
+}
+
+func (s *Supervisor) logAgentState(agentName, state string) {
+	if s.Logger != nil {
+		s.Logger.LogAgentState(agentName, state)
+	}
+}
+
+func (s *Supervisor) logAgentActivity(agentName, activity string) {
+	if s.Logger != nil {
+		s.Logger.LogAgentActivity(agentName, activity)
+	}
+}
+
+func (s *Supervisor) logAgentInput(agentName, input string) {
+	if s.Logger != nil {
+		s.Logger.LogAgentInput(agentName, input)
+	}
+}
+
+func (s *Supervisor) logAgentOutput(agentName, output string) {
+	if s.Logger != nil {
+		s.Logger.LogAgentOutput(agentName, output)
+	}
+}
+
+func (s *Supervisor) attachACPLogger(client ACPClient) {
+	if s.Logger == nil || client == nil {
+		return
+	}
+	if loggerAware, ok := client.(interface{ SetLogger(*logging.ProjectLogger) }); ok {
+		loggerAware.SetLogger(s.Logger)
+	}
 }

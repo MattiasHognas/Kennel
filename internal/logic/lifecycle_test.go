@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -313,5 +314,75 @@ func TestProjectCompletesAutomaticallyWhenSupervisorFinishes(t *testing.T) {
 	}
 	if stored.State != agent.Completed.String() {
 		t.Fatalf("stored project state = %q, want %q", stored.State, agent.Completed.String())
+	}
+}
+
+func TestProjectStopsInsteadOfCompletingWhenSupervisorFails(t *testing.T) {
+	repo := newTestRepository(t)
+
+	projectRecord, err := repo.CreateProject(context.Background(), "Failed Run", `C:\src\failed-run`, "do work")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	done := make(chan struct{})
+	close(done)
+	result := make(chan error, 1)
+	result <- errors.New("planner failed")
+	close(result)
+	eventChan := make(chan eventbus.Event)
+	source := supervisorSource{
+		projectIndex: 0,
+		channel:      eventChan,
+		done:         done,
+		result:       result,
+	}
+
+	_, cancelCtx := context.WithCancel(context.Background())
+	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
+		Config: ProjectConfig{
+			ProjectID:    projectRecord.ID,
+			Name:         projectRecord.Name,
+			Workplace:    projectRecord.Workplace,
+			Instructions: projectRecord.Instructions,
+		},
+		State: ProjectState{
+			State: agent.Running,
+		},
+		Runtime: ProjectRuntime{
+			SupervisorEvents: source.channel,
+			SupervisorDone:   source.done,
+			SupervisorResult: source.result,
+			CancelCtx:        cancelCtx,
+		},
+	}}, repo)
+
+	completedMsg := runCmdWithTimeout(t, waitForSupervisorUpdate(source), 2*time.Second)
+	supervisorMsg, ok := completedMsg.(supervisorCompletedMsg)
+	if !ok {
+		t.Fatalf("expected supervisorCompletedMsg, got %T: %#v", completedMsg, completedMsg)
+	}
+	if supervisorMsg.err == nil {
+		t.Fatal("expected supervisorCompletedMsg to carry run error")
+	}
+
+	modelAfterComplete, _ := m.Update(completedMsg)
+	finalModel, ok := modelAfterComplete.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", modelAfterComplete)
+	}
+	if finalModel.projects[0].State.State != agent.Stopped {
+		t.Fatalf("state after supervisor failure = %s, want %s", finalModel.projects[0].State.State, agent.Stopped)
+	}
+	if finalModel.projects[0].Runtime.Supervisor != nil {
+		t.Fatal("expected supervisor to be cleared after failure")
+	}
+
+	stored, err := repo.ReadProject(context.Background(), projectRecord.ID)
+	if err != nil {
+		t.Fatalf("read project: %v", err)
+	}
+	if stored.State != agent.Stopped.String() {
+		t.Fatalf("stored project state = %q, want %q", stored.State, agent.Stopped.String())
 	}
 }

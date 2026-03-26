@@ -1,5 +1,7 @@
 *.exe
+*.log
 coverage.out
 /data
 /test_project
 /app
+/logs

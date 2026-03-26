@@ -47,13 +47,16 @@ func (m *Model) startSelectedProject() tea.Cmd {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
+	runResult := make(chan error, 1)
 	project.Runtime.CancelCtx = cancel
 	project.Runtime.SupervisorDone = runDone
+	project.Runtime.SupervisorResult = runResult
 
 	eb := eventbus.NewEventBus()
-	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic), done: runDone}
+	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(eventbus.SupervisorTopic), done: runDone, result: runResult}
 	sup := supervisor.NewSupervisor(m.repository, eb, defaultAgentsDir(), project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
 	project.Runtime.Supervisor = sup
+	project.Runtime.Logger = sup.Logger
 	project.Runtime.SupervisorEvents = source.channel
 
 	var configuredAgents []string
@@ -63,7 +66,8 @@ func (m *Model) startSelectedProject() tea.Cmd {
 
 	go func() {
 		defer close(runDone)
-		_ = sup.RunPlan(ctx, project.Config.Instructions, configuredAgents)
+		runResult <- sup.RunPlan(ctx, project.Config.Instructions, configuredAgents)
+		close(runResult)
 	}()
 
 	project.State.State = agent.Running
@@ -72,6 +76,44 @@ func (m *Model) startSelectedProject() tea.Cmd {
 	m.refreshProjectAndSelection(projectIndex)
 
 	return waitForSupervisorUpdate(source)
+}
+
+func (m *Model) clearProjectSupervisor(project *Project) {
+	if project == nil {
+		return
+	}
+
+	if project.Runtime.CancelCtx != nil {
+		project.Runtime.CancelCtx()
+		project.Runtime.CancelCtx = nil
+	}
+	project.Runtime.SupervisorDone = nil
+	project.Runtime.SupervisorResult = nil
+
+	if project.Runtime.SupervisorEvents != nil {
+		if project.Runtime.Supervisor != nil {
+			project.Runtime.Supervisor.EventBus.Unsubscribe(eventbus.SupervisorTopic, project.Runtime.SupervisorEvents)
+		}
+	}
+	project.Runtime.SupervisorEvents = nil
+	project.Runtime.Supervisor = nil
+}
+
+func (m *Model) failProjectAtIndex(projectIndex int) []ActivitySource {
+	if projectIndex < 0 || projectIndex >= len(m.projects) {
+		return nil
+	}
+
+	project := &m.projects[projectIndex]
+	m.clearProjectSupervisor(project)
+
+	if m.repository != nil && project.Config.ProjectID > 0 {
+		return m.syncProjectFromRepository(projectIndex)
+	}
+
+	project.State.State = agent.Stopped
+	m.refreshProjectAndSelection(projectIndex)
+	return nil
 }
 
 func (m *Model) stopSelectedProject() {
@@ -84,8 +126,9 @@ func (m *Model) stopSelectedProject() {
 	if project.Runtime.CancelCtx != nil {
 		project.Runtime.CancelCtx()
 		project.Runtime.CancelCtx = nil
-		project.Runtime.SupervisorDone = nil
 	}
+	project.Runtime.SupervisorDone = nil
+	project.Runtime.SupervisorResult = nil
 	// Cancel and clear any per-project activity listener context to avoid leaking goroutines.
 	if project.Runtime.ActivityCancel != nil {
 		project.Runtime.ActivityCancel()
@@ -128,8 +171,9 @@ func (m *Model) completeProjectAtIndex(projectIndex int) {
 	if project.Runtime.CancelCtx != nil {
 		project.Runtime.CancelCtx()
 		project.Runtime.CancelCtx = nil
-		project.Runtime.SupervisorDone = nil
 	}
+	project.Runtime.SupervisorDone = nil
+	project.Runtime.SupervisorResult = nil
 	if project.Runtime.ActivityCancel != nil {
 		project.Runtime.ActivityCancel()
 		project.Runtime.ActivityCancel = nil
@@ -216,7 +260,7 @@ func (m *Model) cycleSelectedAgentState() {
 	}
 
 	switch agentInstance.State() {
-	case agent.Stopped:
+	case agent.Stopped, agent.Failed:
 		m.startSelectedAgent()
 	default:
 		m.stopSelectedAgent()

@@ -13,6 +13,7 @@ const (
 	Stopped AgentState = iota
 	Running
 	Completed
+	Failed
 )
 
 const (
@@ -25,6 +26,7 @@ type AgentContract interface {
 	Run(ctx context.Context) eventbus.EventChan
 	Stop() AgentState
 	Complete() AgentState
+	Fail(err error) AgentState
 	State() AgentState
 	Hydrate(state AgentState)
 	SubscribeActivity() eventbus.EventChan
@@ -59,7 +61,7 @@ func (a *Agent) Run(ctx context.Context) eventbus.EventChan {
 
 func (a *Agent) Stop() AgentState {
 	a.mu.Lock()
-	wasActive := a.started || a.state == Running || a.state == Completed
+	wasActive := a.started || a.state == Running || a.state == Completed || a.state == Failed
 	if a.started {
 		a.started = false
 	}
@@ -74,7 +76,7 @@ func (a *Agent) Stop() AgentState {
 
 func (a *Agent) Complete() AgentState {
 	a.mu.Lock()
-	wasActive := a.started || a.state == Running || a.state == Completed
+	wasActive := a.started || a.state == Running || a.state == Completed || a.state == Failed
 	if a.started {
 		a.started = false
 	}
@@ -85,6 +87,21 @@ func (a *Agent) Complete() AgentState {
 		a.publishActivity(eventbus.WorkerCompletionEvent{Result: "completed"})
 	}
 	return Completed
+}
+
+func (a *Agent) Fail(err error) AgentState {
+	a.mu.Lock()
+	wasActive := a.started || a.state == Running || a.state == Completed || a.state == Failed
+	if a.started {
+		a.started = false
+	}
+	a.state = Failed
+	a.mu.Unlock()
+
+	if wasActive {
+		a.publishActivity(eventbus.WorkerFailureEvent{Error: err})
+	}
+	return Failed
 }
 
 func (a *Agent) State() AgentState {
@@ -111,6 +128,8 @@ func (a AgentState) String() string {
 		return "running"
 	case Completed:
 		return "completed"
+	case Failed:
+		return "failed"
 	default:
 		return "stopped"
 	}

@@ -58,6 +58,24 @@ func TestHydrateSetsStateWithoutPublishingActivity(t *testing.T) {
 	assertNoActivity(t, activityCh)
 }
 
+func TestFailPublishesFailureAfterActivation(t *testing.T) {
+	a := NewAgent("Tester")
+	activityCh := a.SubscribeActivity()
+
+	a.Fail(nil)
+	assertNoActivity(t, activityCh)
+
+	a.Run(context.Background())
+	assertActivityType(t, activityCh, eventbus.WorkerMessageEvent{})
+
+	a.Fail(fmt.Errorf("boom"))
+	assertActivityType(t, activityCh, eventbus.WorkerFailureEvent{})
+
+	if got := a.State(); got != Failed {
+		t.Fatalf("state = %s, want %s", got, Failed)
+	}
+}
+
 func assertActivityType(t *testing.T, ch <-chan eventbus.Event, wantType interface{}) {
 	t.Helper()
 

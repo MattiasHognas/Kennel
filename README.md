@@ -102,6 +102,25 @@ uses the same schema and provides defaults for every agent.
 | `devops`            | Manages build scripts, CI/CD, deployment     |
 | `docs-writer`       | Creates and updates documentation            |
 
+### Plan view
+
+Discovery stays flat on disk under `agents/`, but the TUI renders the working
+plan from the planner's existing `streams` output. `planner` and
+`branch-setup` stay visible as standalone rows, while planned work is grouped
+under stream headers.
+
+```text
+planner
+branch-setup
+[-] Stream 1 (2 tasks)
+   1. backend-developer - Build API
+   2. tester - Run tests
+[+] Stream 2 (3 tasks)
+```
+
+When the plan table is focused, `enter` toggles the selected stream between
+expanded and collapsed states.
+
 ### Adding a custom agent
 
 1. Create a new directory under `agents/`, e.g. `agents/my-agent/`.

@@ -26,6 +26,12 @@ func waitForActivity(source ActivitySource) tea.Cmd {
 				text = p.Reason
 			case eventbus.WorkerCompletionEvent:
 				text = p.Result
+			case eventbus.WorkerFailureEvent:
+				if p.Error != nil {
+					text = p.Error.Error()
+				} else {
+					text = "failed"
+				}
 			case eventbus.PlanUpdateEvent:
 				text = "Plan updated"
 			case string:
@@ -66,6 +72,7 @@ func (m *Model) BuildSupervisorSources() []supervisorSource {
 			projectIndex: projectIndex,
 			channel:      channel,
 			done:         m.projects[projectIndex].Runtime.SupervisorDone,
+			result:       m.projects[projectIndex].Runtime.SupervisorResult,
 		})
 	}
 	return sources
@@ -137,11 +144,29 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 func waitForSupervisorUpdate(source supervisorSource) tea.Cmd {
 	return func() tea.Msg {
 		select {
+		case err, ok := <-source.result:
+			if !ok {
+				return supervisorCompletedMsg{source: source}
+			}
+			return supervisorCompletedMsg{source: source, err: err}
 		case <-source.done:
+			if source.result != nil {
+				select {
+				case err, ok := <-source.result:
+					if ok {
+						return supervisorCompletedMsg{source: source, err: err}
+					}
+				default:
+				}
+			}
 			return supervisorCompletedMsg{source: source}
 		case event, ok := <-source.channel:
 			if !ok {
 				return nil
+			}
+
+			if planEvent, ok := event.Payload.(eventbus.PlanUpdateEvent); ok {
+				return supervisorPlanMsg{source: source, plan: planEvent.Plan}
 			}
 
 			syncEvent, ok := event.Payload.(eventbus.SupervisorSyncEvent)
