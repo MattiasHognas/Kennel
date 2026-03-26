@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -30,14 +31,35 @@ type Plan struct {
 	Streams []TaskStream `json:"streams"`
 }
 
+type executionTask struct {
+	PlanTask
+	ForceRun bool
+}
+
+type executionStream []executionTask
+
+type executionState struct {
+	agentMap           map[string]data.AgentDefinition
+	agentStateMap      map[string]data.Agent
+	agentStateMu       *sync.RWMutex
+	completedBeforeRun map[string]struct{}
+	executedAgents     map[string]struct{}
+	planningAgents     []string
+	stepCounter        *int64
+	publishedPlan      *Plan
+	planMu             *sync.Mutex
+}
+
 func ParsePlanOutput(output string) (Plan, error) {
 	return parsePlanJSON(extractPlanJSON(output))
 }
 
 const (
 	branchSetupAgentName    = "branch-setup"
+	codeReviewerAgentName   = "code-reviewer"
 	plannerAgentName        = "planner"
 	generalPurposeAgentName = "general-purpose"
+	testerAgentName         = "tester"
 )
 
 type Repository interface {
@@ -120,9 +142,13 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 	}
 
 	agentStateMap := make(map[string]data.Agent)
+	completedBeforeRun := make(map[string]struct{})
 	var agentStateMu sync.RWMutex
 	for _, a := range proj.Agents {
 		agentStateMap[a.Name] = a
+		if a.State == "completed" {
+			completedBeforeRun[a.Name] = struct{}{}
+		}
 	}
 
 	defs, err := data.LoadAgentDefinitions(s.AgentsDir)
@@ -271,88 +297,21 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		return s.failStop(ctx, 1, "checkpoint_failed", fmt.Errorf("checkpoint after branch setup: %w", saveErr))
 	}
 
-	g, gCtx := errgroup.WithContext(ctx)
-
-	for streamIdx, stream := range plan.Streams {
-		streamIdx := streamIdx
-		stream := stream
-
-		g.Go(func() error {
-			currentPrompt := setupOut
-			for stepIdx, step := range stream {
-				def, ok := agentMap[step.Agent]
-				if !ok {
-					return fmt.Errorf("agent %s not found in stream %d", step.Agent, streamIdx)
-				}
-
-				agentStateMu.RLock()
-				agentRec, found := agentStateMap[step.Agent]
-				agentStateMu.RUnlock()
-
-				if !found {
-					return fmt.Errorf("agent %s not found in project state for stream %d", step.Agent, streamIdx)
-				}
-
-				if agentRec.State == "completed" {
-					currentPrompt = agentRec.Output
-					s.logAgentActivity(step.Agent, "reused completed output")
-					continue
-				}
-
-				if err := s.markAgentRunning(gCtx, agentRec, step.Task); err != nil {
-					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
-						s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
-					}
-					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
-				}
-				agentRec.State = "running"
-				agentStateMu.Lock()
-				agentStateMap[step.Agent] = agentRec
-				agentStateMu.Unlock()
-
-				wrapper, err := s.AcpFactory(gCtx, def, s.EventBus, s.Workplace, step.Agent)
-				if err != nil {
-					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
-						s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
-					}
-					return fmt.Errorf("launch_failed for %s: %w", step.Agent, err)
-				}
-				s.attachACPLogger(wrapper)
-
-				promptContext := buildTaskPrompt(step.Task, currentPrompt, def.PromptContext.PreviousOutput)
-				s.logAgentInput(step.Agent, promptContext)
-				out, err := wrapper.Prompt(gCtx, promptContext)
-				if err != nil {
-					wrapper.Close()
-					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
-						s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
-					}
-					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
-				}
-				s.logAgentOutput(step.Agent, out)
-
-				wrapper.Close()
-				currentPrompt = out
-
-				if err := s.completeAgent(gCtx, agentRec, currentPrompt); err != nil {
-					s.reportAgentError(step.Agent, "Failed to persist agent completion: %v", err)
-				} else {
-					agentRec.Output = currentPrompt
-					agentRec.State = "completed"
-					agentStateMu.Lock()
-					agentStateMap[step.Agent] = agentRec
-					agentStateMu.Unlock()
-				}
-
-				if saveErr := s.Repo.CheckpointSupervisorRun(gCtx, s.ProjectID, 2+streamIdx*100+stepIdx, "completed", out); saveErr != nil {
-					return fmt.Errorf("checkpoint after stream %d step %d: %w", streamIdx, stepIdx, saveErr)
-				}
-			}
-			return nil
-		})
+	stepCounter := int64(1)
+	planMu := &sync.Mutex{}
+	execState := &executionState{
+		agentMap:           agentMap,
+		agentStateMap:      agentStateMap,
+		agentStateMu:       &agentStateMu,
+		completedBeforeRun: completedBeforeRun,
+		executedAgents:     make(map[string]struct{}),
+		planningAgents:     planningAgents,
+		stepCounter:        &stepCounter,
+		publishedPlan:      &plan,
+		planMu:             planMu,
 	}
 
-	if err := g.Wait(); err != nil {
+	if err := s.executePlan(ctx, planToExecutionStreams(plan, false), setupOut, execState); err != nil {
 		return s.failStop(ctx, -1, "stream_execution_failed", err)
 	}
 
@@ -511,12 +470,182 @@ func collectRequiredAgents(plan Plan) []string {
 	return requiredAgents
 }
 
+func planToExecutionStreams(plan Plan, forceRun bool) []executionStream {
+	streams := make([]executionStream, 0, len(plan.Streams))
+	for _, stream := range plan.Streams {
+		execution := make(executionStream, 0, len(stream))
+		for _, task := range stream {
+			execution = append(execution, executionTask{PlanTask: task, ForceRun: forceRun})
+		}
+		streams = append(streams, execution)
+	}
+	return streams
+}
+
+func (s *Supervisor) executePlan(ctx context.Context, streams []executionStream, initialPrompt string, state *executionState) error {
+	g, gCtx := errgroup.WithContext(ctx)
+
+	for _, stream := range streams {
+		stream := stream
+		g.Go(func() error {
+			currentPrompt := initialPrompt
+			for _, step := range stream {
+				var err error
+				currentPrompt, err = s.executeTask(gCtx, step, currentPrompt, state)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+
+	return g.Wait()
+}
+
+func (s *Supervisor) executeTask(ctx context.Context, step executionTask, currentPrompt string, state *executionState) (string, error) {
+	def, ok := state.agentMap[step.Agent]
+	if !ok {
+		return "", fmt.Errorf("agent %s not found", step.Agent)
+	}
+
+	state.agentStateMu.RLock()
+	agentRec, found := state.agentStateMap[step.Agent]
+	_, completedBeforeRun := state.completedBeforeRun[step.Agent]
+	_, executedThisRun := state.executedAgents[step.Agent]
+	state.agentStateMu.RUnlock()
+	if !found {
+		return "", fmt.Errorf("agent %s not found in project state", step.Agent)
+	}
+
+	if agentRec.State == "completed" && !step.ForceRun && completedBeforeRun && !executedThisRun {
+		s.logAgentActivity(step.Agent, "reused completed output")
+		return agentRec.Output, nil
+	}
+
+	if err := s.markAgentRunning(ctx, agentRec, step.Task); err != nil {
+		if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
+			s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
+		}
+		return "", fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
+	}
+
+	agentRec.State = "running"
+	state.agentStateMu.Lock()
+	state.agentStateMap[step.Agent] = agentRec
+	state.agentStateMu.Unlock()
+
+	wrapper, err := s.AcpFactory(ctx, def, s.EventBus, s.Workplace, step.Agent)
+	if err != nil {
+		if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
+			s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
+		}
+		return "", fmt.Errorf("launch_failed for %s: %w", step.Agent, err)
+	}
+	s.attachACPLogger(wrapper)
+	defer wrapper.Close()
+
+	promptContext := buildAgentTaskPrompt(step.Agent, step.Task, currentPrompt, def.PromptContext.PreviousOutput, state.planningAgents)
+	s.logAgentInput(step.Agent, promptContext)
+	out, err := wrapper.Prompt(ctx, promptContext)
+	if err != nil {
+		if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
+			s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
+		}
+		return "", fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
+	}
+	s.logAgentOutput(step.Agent, out)
+
+	if err := s.completeAgent(ctx, agentRec, out); err != nil {
+		s.reportAgentError(step.Agent, "Failed to persist agent completion: %v", err)
+	} else {
+		agentRec.Output = out
+		agentRec.State = "completed"
+		state.agentStateMu.Lock()
+		state.agentStateMap[step.Agent] = agentRec
+		state.executedAgents[step.Agent] = struct{}{}
+		state.agentStateMu.Unlock()
+	}
+
+	checkpointIndex := int(atomic.AddInt64(state.stepCounter, 1))
+	if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, checkpointIndex, "completed", out); saveErr != nil {
+		return "", fmt.Errorf("checkpoint after %s: %w", step.Agent, saveErr)
+	}
+
+	followUpPlan, hasFollowUp, err := parseFollowUpPlan(step.Agent, out)
+	if err != nil {
+		return "", fmt.Errorf("follow-up plan failed for %s: %w", step.Agent, err)
+	}
+	if hasFollowUp {
+		if err := resolvePlanAgents(&followUpPlan, state.agentMap); err != nil {
+			return "", fmt.Errorf("follow-up plan validation failed for %s: %w", step.Agent, err)
+		}
+
+		state.agentStateMu.Lock()
+		ensureErr := s.ensurePlanAgents(ctx, followUpPlan, state.agentMap, state.agentStateMap)
+		state.agentStateMu.Unlock()
+		if ensureErr != nil {
+			return "", fmt.Errorf("follow-up plan validation failed for %s: %w", step.Agent, ensureErr)
+		}
+
+		s.recordAgentActivity(ctx, agentRec, fmt.Sprintf("scheduled %d follow-up stream(s)", len(followUpPlan.Streams)))
+		s.publishPlan(appendPublishedPlan(state, followUpPlan))
+
+		if err := s.executePlan(ctx, planToExecutionStreams(followUpPlan, true), out, state); err != nil {
+			return "", err
+		}
+	}
+
+	return out, nil
+}
+
+func appendPublishedPlan(state *executionState, followUpPlan Plan) Plan {
+	state.planMu.Lock()
+	defer state.planMu.Unlock()
+
+	state.publishedPlan.Streams = append(state.publishedPlan.Streams, followUpPlan.Streams...)
+	return clonePlan(*state.publishedPlan)
+}
+
+func clonePlan(plan Plan) Plan {
+	cloned := Plan{Streams: make([]TaskStream, len(plan.Streams))}
+	for index, stream := range plan.Streams {
+		cloned.Streams[index] = append(TaskStream(nil), stream...)
+	}
+	return cloned
+}
+
 func buildTaskPrompt(task string, previousOutput string, includePreviousOutput bool) string {
 	if !includePreviousOutput || strings.TrimSpace(previousOutput) == "" {
 		return fmt.Sprintf("Task: %s", task)
 	}
 
 	return fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", task, previousOutput)
+}
+
+func buildAgentTaskPrompt(agentName, task, previousOutput string, includePreviousOutput bool, planningAgents []string) string {
+	prompt := buildTaskPrompt(task, previousOutput, includePreviousOutput)
+	if !canEmitFollowUpPlan(agentName) || len(planningAgents) == 0 {
+		return prompt
+	}
+
+	sections := []string{
+		prompt,
+		fmt.Sprintf("If you identify concrete follow-up work, append a final JSON code block with this schema: ```json\n{\"streams\":[[{\"agent\":\"agent-name\",\"task\":\"task description\"}]]}\n```"),
+		"Only include the JSON block when new work should be scheduled. Keep any review or test findings before the JSON block.",
+		fmt.Sprintf("Use only these exact agent names in follow-up tasks: %s", strings.Join(planningAgents, ", ")),
+	}
+
+	return strings.Join(sections, "\n\n")
+}
+
+func canEmitFollowUpPlan(agentName string) bool {
+	switch CanonicalAgentName(agentName) {
+	case codeReviewerAgentName, testerAgentName:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Supervisor) validateWorkplaceGitRoot(ctx context.Context) error {
@@ -712,6 +841,47 @@ func extractPlanJSON(output string) string {
 	}
 
 	return rawJSON
+}
+
+func extractFollowUpPlanJSON(output string) (string, bool) {
+	jsonBlockRegex := regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```")
+	for _, matches := range jsonBlockRegex.FindAllStringSubmatch(output, -1) {
+		candidate := strings.TrimSpace(matches[1])
+		if strings.Contains(candidate, `"streams"`) {
+			return candidate, true
+		}
+	}
+
+	trimmed := strings.TrimSpace(output)
+	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") && strings.Contains(trimmed, `"streams"`) {
+		return trimmed, true
+	}
+
+	return "", false
+}
+
+func parseFollowUpPlan(agentName, output string) (Plan, bool, error) {
+	if !canEmitFollowUpPlan(agentName) {
+		return Plan{}, false, nil
+	}
+
+	rawJSON, ok := extractFollowUpPlanJSON(output)
+	if !ok {
+		return Plan{}, false, nil
+	}
+
+	plan, err := parsePlanJSON(rawJSON)
+	if err != nil {
+		return Plan{}, false, err
+	}
+	if len(plan.Streams) == 0 {
+		return Plan{}, false, nil
+	}
+	if err := normalizePlan(&plan); err != nil {
+		return Plan{}, false, err
+	}
+
+	return plan, true, nil
 }
 
 func parsePlanJSON(rawJSON string) (Plan, error) {
