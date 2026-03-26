@@ -12,8 +12,14 @@ import (
 func TestLoadProjectsSeedsRepositoryOnce(t *testing.T) {
 	repo := newTestRepository(t)
 
-	loaded := loadProjects(repo)
-	want := sampleProjects()
+	loaded, err := loadProjects(repo)
+	if err != nil {
+		t.Fatalf("load projects: %v", err)
+	}
+	want, err := sampleProjects()
+	if err != nil {
+		t.Fatalf("sample projects: %v", err)
+	}
 	assertProjectShape(t, loaded, want)
 
 	stored, err := repo.ReadProjects(context.Background())
@@ -22,7 +28,10 @@ func TestLoadProjectsSeedsRepositoryOnce(t *testing.T) {
 	}
 	assertStoredProjectShape(t, stored, want)
 
-	loadedAgain := loadProjects(repo)
+	loadedAgain, err := loadProjects(repo)
+	if err != nil {
+		t.Fatalf("load projects again: %v", err)
+	}
 	assertProjectShape(t, loadedAgain, want)
 
 	storedAgain, err := repo.ReadProjects(context.Background())

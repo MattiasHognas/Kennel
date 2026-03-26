@@ -1,0 +1,22 @@
+{
+  "promptContext": {
+    "previousOutput": true
+  },
+  "permissions": {
+    "git": {
+      "status": true,
+      "diff": true,
+      "history": false
+    },
+    "acp": {
+      "readTextFile": true,
+      "writeTextFile": true,
+      "requestPermission": false,
+      "createTerminal": false,
+      "killTerminal": false,
+      "terminalOutput": false,
+      "releaseTerminal": false,
+      "waitForTerminal": false
+    }
+  }
+}

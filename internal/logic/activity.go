@@ -1,7 +1,7 @@
-package model
+package logic
 
 import (
-	eventbus "MattiasHognas/Kennel/internal/events"
+	data "MattiasHognas/Kennel/internal/data"
 	"context"
 	"fmt"
 	"time"
@@ -20,13 +20,19 @@ func waitForActivity(source ActivitySource) tea.Cmd {
 			}
 			var text string
 			switch p := event.Payload.(type) {
-			case eventbus.WorkerMessageEvent:
+			case data.WorkerMessageEvent:
 				text = p.Chunk
-			case eventbus.WorkerCancellationEvent:
+			case data.WorkerCancellationEvent:
 				text = p.Reason
-			case eventbus.WorkerCompletionEvent:
+			case data.WorkerCompletionEvent:
 				text = p.Result
-			case eventbus.PlanUpdateEvent:
+			case data.WorkerFailureEvent:
+				if p.Error != nil {
+					text = p.Error.Error()
+				} else {
+					text = "failed"
+				}
+			case data.PlanUpdateEvent:
 				text = "Plan updated"
 			case string:
 				text = p
@@ -66,6 +72,7 @@ func (m *Model) BuildSupervisorSources() []supervisorSource {
 			projectIndex: projectIndex,
 			channel:      channel,
 			done:         m.projects[projectIndex].Runtime.SupervisorDone,
+			result:       m.projects[projectIndex].Runtime.SupervisorResult,
 		})
 	}
 	return sources
@@ -137,14 +144,32 @@ func (m *Model) recordActivity(source ActivitySource, text string) {
 func waitForSupervisorUpdate(source supervisorSource) tea.Cmd {
 	return func() tea.Msg {
 		select {
+		case err, ok := <-source.result:
+			if !ok {
+				return supervisorCompletedMsg{source: source}
+			}
+			return supervisorCompletedMsg{source: source, err: err}
 		case <-source.done:
-			return nil
+			if source.result != nil {
+				select {
+				case err, ok := <-source.result:
+					if ok {
+						return supervisorCompletedMsg{source: source, err: err}
+					}
+				default:
+				}
+			}
+			return supervisorCompletedMsg{source: source}
 		case event, ok := <-source.channel:
 			if !ok {
 				return nil
 			}
 
-			syncEvent, ok := event.Payload.(eventbus.SupervisorSyncEvent)
+			if planEvent, ok := event.Payload.(data.PlanUpdateEvent); ok {
+				return supervisorPlanMsg{source: source, plan: planEvent.Plan}
+			}
+
+			syncEvent, ok := event.Payload.(data.SupervisorSyncEvent)
 			if !ok {
 				return supervisorSyncMsg{source: source}
 			}

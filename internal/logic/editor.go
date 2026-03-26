@@ -1,12 +1,11 @@
-package model
+package logic
 
 import (
+	ui "MattiasHognas/Kennel/internal/ui"
+	workers "MattiasHognas/Kennel/internal/workers"
 	"context"
 	"fmt"
 	"strings"
-
-	"MattiasHognas/Kennel/internal/ui"
-	agent "MattiasHognas/Kennel/internal/workers"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
@@ -222,7 +221,7 @@ func (m *Model) saveSelectedProjectEditor() tea.Cmd {
 				Instructions: instructions,
 			},
 			State: ProjectState{
-				State: agent.Stopped,
+				State: workers.Stopped,
 			},
 			Runtime: ProjectRuntime{
 				Agents:     nil,

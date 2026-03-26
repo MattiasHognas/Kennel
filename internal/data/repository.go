@@ -1,4 +1,4 @@
-package repository
+package data
 
 import (
 	"context"
@@ -523,36 +523,6 @@ func (r *SQLiteRepository) ensureSchema(ctx context.Context) error {
 		return fmt.Errorf("create sqlite schema: %w", err)
 	}
 
-	var hasStateColumn bool
-	rows, err := r.db.QueryContext(ctx, `PRAGMA table_info(agents)`)
-	if err != nil {
-		return fmt.Errorf("check agents table schema: %w", err)
-	}
-	for rows.Next() {
-		var cid int
-		var name string
-		var typ, notnull, dfltValue, pk interface{}
-		if err := rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan table_info: %w", err)
-		}
-		if name == "state" {
-			hasStateColumn = true
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate table_info: %w", err)
-	}
-	rows.Close()
-
-	if !hasStateColumn {
-		if _, err := r.db.ExecContext(ctx, `ALTER TABLE agents ADD COLUMN state TEXT NOT NULL DEFAULT 'stopped'`); err != nil {
-			return fmt.Errorf("migrate agents table with state column: %w", err)
-		}
-	}
-
 	if _, err := r.db.ExecContext(ctx, `UPDATE agents SET state = 'stopped' WHERE lower(state) = 'paused'`); err != nil {
 		return fmt.Errorf("migrate legacy paused states: %w", err)
 	}
@@ -597,7 +567,7 @@ func (r *SQLiteRepository) ensureSchema(ctx context.Context) error {
 func normalizeState(state string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(state))
 	switch trimmed {
-	case "running", "stopped", "completed":
+	case "running", "stopped", "completed", "failed":
 		return trimmed
 	default:
 		return "stopped"
@@ -622,9 +592,6 @@ func ensureDatabaseDirectory(dsn string) error {
 }
 
 func (r *SQLiteRepository) CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error {
-	_, err := r.db.ExecContext(ctx, `
-INSERT INTO supervisor_runs (project_id, status, checkpoint_data)
-VALUES (?, ?, ?)
-`, projectID, fmt.Sprintf("Step %d: %s", stepIndex, status), data)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO supervisor_runs (project_id, status, checkpoint_data) VALUES (?, ?, ?)`, projectID, fmt.Sprintf("Step %d: %s", stepIndex, status), data)
 	return err
 }

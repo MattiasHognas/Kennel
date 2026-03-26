@@ -1,0 +1,30 @@
+{
+  "promptContext": {
+    "previousOutput": true
+  },
+  "permissions": {
+    "git": {
+      "status": false,
+      "diff": false,
+      "history": false
+    },
+    "acp": {
+      "readTextFile": true,
+      "writeTextFile": true,
+      "requestPermission": false,
+      "createTerminal": true,
+      "killTerminal": true,
+      "terminalOutput": true,
+      "releaseTerminal": true,
+      "waitForTerminal": true
+    }
+  },
+  "mcpServers": [
+    {
+      "transport": "stdio",
+      "name": "playwright",
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  ]
+}

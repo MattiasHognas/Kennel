@@ -4,157 +4,193 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
-	repository "MattiasHognas/Kennel/internal/data"
-	model "MattiasHognas/Kennel/internal/logic"
-	"MattiasHognas/Kennel/internal/ui"
-	agent "MattiasHognas/Kennel/internal/workers"
+	data "MattiasHognas/Kennel/internal/data"
+	logic "MattiasHognas/Kennel/internal/logic"
+	ui "MattiasHognas/Kennel/internal/ui"
+	workers "MattiasHognas/Kennel/internal/workers"
 
 	tea "charm.land/bubbletea/v2"
 )
 
+const appLoggerName = "app"
+
 func main() {
-	m, cleanup := initialModel()
+	appLogger := data.NewProjectLogger(".", 0, appLoggerName)
+	m, cleanup, err := initialModel()
+	if err != nil {
+		reportAppError(appLogger, "Failed to initialize application: %v", err)
+		return
+	}
 
 	p := tea.NewProgram(m)
 	finalModel, err := p.Run()
 	shutdownModel := m
-	if persistedModel, ok := finalModel.(model.Model); ok {
+	if persistedModel, ok := finalModel.(logic.Model); ok {
 		shutdownModel = persistedModel
 	}
 	shutdownModel.Shutdown()
 	cleanup()
 
 	if err != nil {
-		panic(fmt.Sprintf("Something broke: %v", err))
+		reportAppError(appLogger, "Something broke: %v", err)
 	}
 }
 
-func initialModel() (model.Model, func()) {
-	focusedStyles, blurredStyles := ui.NewTableStyles()
-	repository, err := repository.NewSQLiteRepository("data/kennel.db")
-	if err != nil {
-		panic(fmt.Sprintf("Failed to initialize repository: %v", err))
+func reportAppError(logger *data.ProjectLogger, format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	if logger != nil {
+		logger.LogProjectError(message)
 	}
-	sampleProjects := loadProjects(repository)
-	m := model.NewModel(focusedStyles, blurredStyles, sampleProjects, repository)
+	log.Printf("%s", message)
+}
 
-	m.ResizeTables(model.DefaultProjectWidth+model.DefaultAgentWidth+model.DefaultActivityWidth, model.DefaultTableHeight+model.FooterHeight+4)
+func initialModel() (logic.Model, func(), error) {
+	focusedStyles, blurredStyles := ui.NewTableStyles()
+	repository, err := data.NewSQLiteRepository("data/kennel.db")
+	if err != nil {
+		return logic.Model{}, func() {}, fmt.Errorf("initialize repository: %w", err)
+	}
+	sampleProjects, err := loadProjects(repository)
+	if err != nil {
+		_ = repository.Close()
+		return logic.Model{}, func() {}, fmt.Errorf("load projects: %w", err)
+	}
+	m := logic.NewModel(focusedStyles, blurredStyles, sampleProjects, repository)
+
+	m.ResizeTables(logic.DefaultProjectWidth+logic.DefaultAgentWidth+logic.DefaultActivityWidth, logic.DefaultTableHeight+logic.FooterHeight+4)
 	m.SetFocus(0)
 
 	cleanup := func() {
 		_ = repository.Close()
 	}
 
-	return m, cleanup
+	return m, cleanup, nil
 }
 
-func sampleProjects() []model.Project {
+func sampleProjects() ([]logic.Project, error) {
+	workplace, err := sampleProjectWorkplace()
+	if err != nil {
+		return nil, err
+	}
 
-	var seedConfig = model.ProjectConfig{Name: "Testing", Workplace: "test_project", Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes"}
+	var seedConfig = logic.ProjectConfig{Name: "Sample project", Workplace: workplace, Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes and a frontend where you can cycle trough the jokes"}
 
-	projects := make([]model.Project, 0)
-	agents := make([]agent.AgentContract, 0)
+	projects := make([]logic.Project, 0)
+	agents := make([]workers.AgentContract, 0)
 
-	projects = append(projects, model.Project{
-		Config: model.ProjectConfig{
+	projects = append(projects, logic.Project{
+		Config: logic.ProjectConfig{
 			Name:         seedConfig.Name,
 			Workplace:    seedConfig.Workplace,
 			Instructions: seedConfig.Instructions,
 		},
-		State: model.ProjectState{
-			State: agent.Stopped,
+		State: logic.ProjectState{
+			State: workers.Stopped,
 		},
-		Runtime: model.ProjectRuntime{
+		Runtime: logic.ProjectRuntime{
 			Agents:     agents,
 			AgentIDs:   nil,
-			Activities: []model.ActivityEntry{},
+			Activities: []logic.ActivityEntry{},
 		},
 	})
 
-	return projects
+	return projects, nil
 }
 
-func loadProjects(repository *repository.SQLiteRepository) []model.Project {
+func sampleProjectWorkplace() (string, error) {
+	absWorkplace, err := filepath.Abs("../test_project")
+	if err != nil {
+		return "", fmt.Errorf("resolve sample project workplace directory: %w", err)
+	}
+
+	return absWorkplace, nil
+}
+
+func loadProjects(repository *data.SQLiteRepository) ([]logic.Project, error) {
 
 	storedProjects, err := repository.ReadProjects(context.Background())
 	if err != nil {
-		_ = repository.Close()
-		panic(fmt.Sprintf("Failed to read projects, falling back to samples: %v\n", err))
+		return nil, fmt.Errorf("read projects: %w", err)
 	}
 
 	if len(storedProjects) == 0 {
 		if err := seedSampleProjects(repository); err != nil {
-			_ = repository.Close()
-			panic(fmt.Sprintf("Failed to seed sample projects, falling back to samples: %v\n", err))
+			return nil, fmt.Errorf("seed sample projects: %w", err)
 		}
 
 		storedProjects, err = repository.ReadProjects(context.Background())
 		if err != nil || len(storedProjects) == 0 {
-			_ = repository.Close()
 			if err != nil {
-				panic(fmt.Sprintf("Failed to read seeded projects, falling back to samples: %v\n", err))
+				return nil, fmt.Errorf("read seeded projects: %w", err)
 			} else {
-				panic("Failed to read seeded projects (empty), falling back to samples\n")
+				return nil, fmt.Errorf("read seeded projects: empty result")
 			}
 		}
 	}
 
-	projects := make([]model.Project, 0, len(storedProjects))
+	projects := make([]logic.Project, 0, len(storedProjects))
 	for _, storedProject := range storedProjects {
-		agents := make([]agent.AgentContract, 0, len(storedProject.Agents))
+		agents := make([]workers.AgentContract, 0, len(storedProject.Agents))
 		agentIDs := make([]int64, 0, len(storedProject.Agents))
 		for _, storedAgent := range storedProject.Agents {
 			agents = append(agents, restoreAgentState(storedAgent.Name, storedAgent.State))
 			agentIDs = append(agentIDs, storedAgent.ID)
 		}
 
-		activities := make([]model.ActivityEntry, 0, len(storedProject.Activities))
+		activities := make([]logic.ActivityEntry, 0, len(storedProject.Activities))
 		for _, activity := range storedProject.Activities {
-			activities = append(activities, model.ActivityEntry{
+			activities = append(activities, logic.ActivityEntry{
 				Timestamp: activity.CreatedAt.Format("15:04:05"),
 				Text:      activity.Text,
 			})
 		}
 
-		projects = append(projects, model.Project{
-			Config: model.ProjectConfig{
+		projects = append(projects, logic.Project{
+			Config: logic.ProjectConfig{
 				ProjectID:    storedProject.ID,
 				Name:         storedProject.Name,
 				Workplace:    storedProject.Workplace,
 				Instructions: storedProject.Instructions,
 			},
-			State: model.ProjectState{
+			State: logic.ProjectState{
 				State: restoreState(storedProject.State),
 			},
-			Runtime: model.ProjectRuntime{
+			Runtime: logic.ProjectRuntime{
 				Agents:     agents,
 				AgentIDs:   agentIDs,
+				Plan:       logic.RestorePlanFromStoredAgents(storedProject.Agents),
 				Activities: activities,
 			},
 		})
 	}
 
-	return projects
+	return projects, nil
 }
 
-func seedSampleProjects(repository *repository.SQLiteRepository) error {
-	for _, definition := range sampleProjects() {
-		if wp := definition.Config.Workplace; wp != "" {
-			absWP := wp
-			if !filepath.IsAbs(absWP) {
-				if wd, err := os.Getwd(); err == nil {
-					absWP = filepath.Join(wd, absWP)
-				}
+func seedSampleProjects(repository *data.SQLiteRepository) error {
+	definitions, err := sampleProjects()
+	if err != nil {
+		return err
+	}
+
+	for _, definition := range definitions {
+		workplace := definition.Config.Workplace
+		if workplace != "" {
+			absWP, err := filepath.Abs(workplace)
+			if err != nil {
+				return fmt.Errorf("resolve workplace directory %q: %w", workplace, err)
 			}
 			if err := os.MkdirAll(absWP, 0o755); err != nil {
 				return fmt.Errorf("create workplace directory %q: %w", absWP, err)
 			}
+			workplace = absWP
 		}
 
-		project, err := repository.CreateProject(context.Background(), definition.Config.Name, definition.Config.Workplace, definition.Config.Instructions)
+		project, err := repository.CreateProject(context.Background(), definition.Config.Name, workplace, definition.Config.Instructions)
 		if err != nil {
 			return err
 		}
@@ -175,24 +211,21 @@ func seedSampleProjects(repository *repository.SQLiteRepository) error {
 	return nil
 }
 
-func restoreAgentState(name string, persistedState string) agent.AgentContract {
-	a := agent.NewAgent(name)
-	switch persistedState {
-	case agent.Running.String():
-		a.Run(context.Background())
-	case agent.Completed.String():
-		a.Complete()
-	}
+func restoreAgentState(name string, persistedState string) workers.AgentContract {
+	a := workers.NewAgent(name)
+	a.Hydrate(restoreState(persistedState))
 	return a
 }
 
-func restoreState(persistedState string) agent.AgentState {
+func restoreState(persistedState string) workers.AgentState {
 	switch persistedState {
-	case agent.Running.String():
-		return agent.Running
-	case agent.Completed.String():
-		return agent.Completed
+	case workers.Running.String():
+		return workers.Running
+	case workers.Completed.String():
+		return workers.Completed
+	case workers.Failed.String():
+		return workers.Failed
 	default:
-		return agent.Stopped
+		return workers.Stopped
 	}
 }

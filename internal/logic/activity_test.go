@@ -1,13 +1,14 @@
-package model
+package logic
 
 import (
-	"context"
-	"database/sql"
-	"testing"
-
-	eventbus "MattiasHognas/Kennel/internal/events"
-	"MattiasHognas/Kennel/internal/ui/table"
+	data "MattiasHognas/Kennel/internal/data"
+	table "MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
 )
 
 func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
@@ -70,7 +71,7 @@ func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 	}
 }
 
-func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
+func TestSupervisorSyncAppliesEventWithoutRepositoryRefresh(t *testing.T) {
 	repo := newTestRepository(t)
 	storedProject, err := repo.CreateProject(context.Background(), "Sync Project", `C:\src\sync-project`, "first line\nsecond line")
 	if err != nil {
@@ -88,22 +89,13 @@ func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
 	}}, repo)
 	m.projectTable.SetCursor(1)
 
-	eb := eventbus.NewEventBus()
-	source := supervisorSource{projectIndex: 0, channel: eb.Subscribe(eventbus.SupervisorTopic)}
+	eb := data.NewEventBus()
+	source := supervisorSource{projectIndex: 0, channel: eb.Subscribe(data.SupervisorTopic)}
 	m.projects[0].Runtime.SupervisorEvents = source.channel
 
-	agentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "planner")
-	if err != nil {
-		t.Fatalf("add agent: %v", err)
-	}
-	if err := repo.UpdateAgentState(context.Background(), agentRecord.ID, agent.Completed.String()); err != nil {
-		t.Fatalf("update agent state: %v", err)
-	}
-	if _, err := repo.NewActivity(context.Background(), storedProject.ID, sql.NullInt64{Int64: agentRecord.ID, Valid: true}, "planner: completed"); err != nil {
-		t.Fatalf("new activity: %v", err)
-	}
-	eb.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.SupervisorSyncEvent{
+	eb.Publish(data.SupervisorTopic, data.Event{Payload: data.SupervisorSyncEvent{
 		ProjectID: storedProject.ID,
+		AgentID:   42,
 		Agent:     "planner",
 		State:     agent.Completed.String(),
 		Activity:  "completed",
@@ -126,6 +118,9 @@ func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
 	if len(updated.projects[0].Runtime.Agents) != 1 {
 		t.Fatalf("agent count = %d, want 1", len(updated.projects[0].Runtime.Agents))
 	}
+	if len(updated.projects[0].Runtime.AgentIDs) != 1 || updated.projects[0].Runtime.AgentIDs[0] != 42 {
+		t.Fatalf("agent ids = %#v, want [42]", updated.projects[0].Runtime.AgentIDs)
+	}
 	if updated.projects[0].Runtime.Agents[0].Name() != "planner" {
 		t.Fatalf("agent name = %q, want planner", updated.projects[0].Runtime.Agents[0].Name())
 	}
@@ -139,13 +134,18 @@ func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
 		t.Fatalf("activity source count = %d, want 1", len(updated.Sources))
 	}
 	if updated.Sources[0].channel != updated.projects[0].Runtime.Agents[0].SubscribeActivity() {
-		t.Fatal("activity source was not rebuilt for refreshed agent")
+		t.Fatal("activity source was not built for added agent")
 	}
 
-	updated.projects[0].Runtime.Agents[0].Complete()
-	activity := waitForActivity(updated.Sources[0])()
-	if activity == nil {
-		t.Fatal("expected activity message from refreshed agent source")
+	persistedProject, err := repo.ReadProject(context.Background(), storedProject.ID)
+	if err != nil {
+		t.Fatalf("read project: %v", err)
+	}
+	if len(persistedProject.Agents) != 0 {
+		t.Fatalf("persisted agent count = %d, want 0 to prove no repository refresh", len(persistedProject.Agents))
+	}
+	if len(persistedProject.Activities) != 0 {
+		t.Fatalf("persisted activity count = %d, want 0 to prove no repository refresh", len(persistedProject.Activities))
 	}
 }
 
@@ -153,12 +153,57 @@ func TestWaitForSupervisorUpdateStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	msg := waitForSupervisorUpdate(supervisorSource{
+	source := supervisorSource{
 		projectIndex: 0,
-		channel:      make(chan eventbus.Event),
+		channel:      make(chan data.Event),
 		done:         ctx.Done(),
-	})()
-	if msg != nil {
-		t.Fatalf("message = %#v, want nil", msg)
+	}
+	msg := waitForSupervisorUpdate(source)()
+	if _, ok := msg.(supervisorCompletedMsg); !ok {
+		t.Fatalf("message = %#v, want supervisorCompletedMsg", msg)
+	}
+}
+
+func TestPersistProjectStateLogsRepositoryFailure(t *testing.T) {
+	repo := newTestRepository(t)
+	storedProject, err := repo.CreateProject(context.Background(), "Logging Project", `C:\src\logging-project`, "instructions")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatalf("close repository: %v", err)
+	}
+
+	logRoot := t.TempDir()
+	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
+		Config: ProjectConfig{
+			ProjectID: storedProject.ID,
+			Name:      storedProject.Name,
+		},
+		State: ProjectState{State: agent.Running},
+		Runtime: ProjectRuntime{
+			Logger: data.NewProjectLogger(logRoot, storedProject.ID, storedProject.Name),
+		},
+	}}, repo)
+
+	m.persistProjectState(&m.projects[0])
+
+	entries, readErr := os.ReadDir(filepath.Join(logRoot, "logs"))
+	if readErr != nil {
+		t.Fatalf("ReadDir returned error: %v", readErr)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("log entry count = %d, want 1", len(entries))
+	}
+
+	content, readErr := os.ReadFile(filepath.Join(logRoot, "logs", entries[0].Name()))
+	if readErr != nil {
+		t.Fatalf("ReadFile returned error: %v", readErr)
+	}
+	text := string(content)
+	for _, fragment := range []string{"PROJECT_STATE", "PROJECT_ERROR", "persist project state"} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("project log missing %q:\n%s", fragment, text)
+		}
 	}
 }

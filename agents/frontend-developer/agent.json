@@ -1,0 +1,36 @@
+{
+  "promptContext": {
+    "previousOutput": true
+  },
+  "permissions": {
+    "git": {
+      "status": true,
+      "diff": true,
+      "history": true
+    },
+    "acp": {
+      "readTextFile": true,
+      "writeTextFile": true,
+      "requestPermission": true,
+      "createTerminal": true,
+      "killTerminal": true,
+      "terminalOutput": true,
+      "releaseTerminal": true,
+      "waitForTerminal": true
+    }
+  },
+  "mcpServers": [
+    {
+      "transport": "stdio",
+      "name": "context7",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    },
+    {
+      "transport": "stdio",
+      "name": "playwright",
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  ]
+}

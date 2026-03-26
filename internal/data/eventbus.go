@@ -1,4 +1,4 @@
-package eventbus
+package data
 
 import "sync"
 
@@ -8,6 +8,7 @@ const SupervisorTopic = "supervisor"
 type PlanUpdateEvent struct{ Plan string }
 type SupervisorSyncEvent struct {
 	ProjectID int64
+	AgentID   int64
 	Agent     string
 	State     string
 	Activity  string
