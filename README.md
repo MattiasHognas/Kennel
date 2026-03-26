@@ -22,7 +22,9 @@ supervisor:
 ## Architecture
 
 ```
+agents/              – Agent definitions (one directory per agent with instructions.md)
 cmd/app/             – Application entry point (Bubble Tea TUI)
+data/                – SQLite database file (projects, agents, activities)
 internal/
   acp/               – ACP SDK wrapper for launching and communicating with agents
   data/              – SQLite repository (projects, agents, activities)
@@ -31,15 +33,15 @@ internal/
   logic/             – TUI model, lifecycle management, editor, activity tracking
   supervisor/        – Orchestration engine that plans and executes agent tasks
   ui/                – Terminal styles and a custom table widget
+  ui/table/          – Custom table widget with support for multiple independent tables and keyboard navigation
   workers/           – Agent abstraction and state machine
-agents/              – Agent definitions (one directory per agent with instructions.md)
 ```
 
 ## Prerequisites
 
 - **Go 1.26+**
 - An ACP-compatible agent binary (the default configuration expects a `copilot`
-  binary on `PATH` — see `agents/copilot.json`).
+  binary on `PATH` — see `agents/cli.json`).
 
 ## Getting Started
 

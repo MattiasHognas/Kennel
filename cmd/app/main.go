@@ -177,12 +177,7 @@ func seedSampleProjects(repository *repository.SQLiteRepository) error {
 
 func restoreAgentState(name string, persistedState string) agent.AgentContract {
 	a := agent.NewAgent(name)
-	switch persistedState {
-	case agent.Running.String():
-		a.Run(context.Background())
-	case agent.Completed.String():
-		a.Complete()
-	}
+	a.Hydrate(restoreState(persistedState))
 	return a
 }
 

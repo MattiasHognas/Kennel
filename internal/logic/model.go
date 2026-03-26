@@ -241,7 +241,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, waitForSupervisorUpdate(msg.source)
 			}
 		}
-		activitySources := m.syncProjectFromRepository(msg.source.projectIndex)
+		activitySources := m.applySupervisorSync(msg.source, msg.event)
 		cmds := make([]tea.Cmd, 0, len(activitySources)+1)
 		cmds = append(cmds, waitForSupervisorUpdate(msg.source))
 		for _, source := range activitySources {
@@ -601,6 +601,67 @@ func (m *Model) shouldListenForSupervisor(source supervisorSource) bool {
 	return project.Runtime.SupervisorEvents == source.channel && project.Runtime.SupervisorDone == source.done
 }
 
+func (m *Model) applySupervisorSync(source supervisorSource, syncEvent eventbus.SupervisorSyncEvent) []ActivitySource {
+	if source.projectIndex < 0 || source.projectIndex >= len(m.projects) {
+		return nil
+	}
+
+	project := &m.projects[source.projectIndex]
+	agentName := strings.TrimSpace(syncEvent.Agent)
+	state := parseAgentState(syncEvent.State)
+	agentIndex := -1
+
+	if syncEvent.AgentID > 0 {
+		for index, agentID := range project.Runtime.AgentIDs {
+			if agentID == syncEvent.AgentID {
+				agentIndex = index
+				break
+			}
+		}
+	}
+
+	if agentIndex == -1 && agentName != "" {
+		for index, agentInstance := range project.Runtime.Agents {
+			if agentInstance.Name() == agentName {
+				agentIndex = index
+				break
+			}
+		}
+	}
+
+	var activitySources []ActivitySource
+	if agentIndex == -1 && agentName != "" {
+		restoredAgent := agent.NewAgent(agentName)
+		restoredAgent.Hydrate(state)
+		project.Runtime.Agents = append(project.Runtime.Agents, restoredAgent)
+		project.Runtime.AgentIDs = append(project.Runtime.AgentIDs, syncEvent.AgentID)
+		agentIndex = len(project.Runtime.Agents) - 1
+		activitySources = m.resetActivitySourcesForProject(source.projectIndex)
+	} else if agentIndex >= 0 {
+		project.Runtime.Agents[agentIndex].Hydrate(state)
+		if syncEvent.AgentID > 0 {
+			for len(project.Runtime.AgentIDs) <= agentIndex {
+				project.Runtime.AgentIDs = append(project.Runtime.AgentIDs, 0)
+			}
+			project.Runtime.AgentIDs[agentIndex] = syncEvent.AgentID
+		}
+	}
+
+	if state == agent.Running && project.State.State == agent.Stopped {
+		project.State.State = agent.Running
+	}
+
+	if activity := strings.TrimSpace(syncEvent.Activity); activity != "" && agentIndex >= 0 {
+		project.Runtime.Activities = append(project.Runtime.Activities, ActivityEntry{
+			Timestamp: time.Now().Format("15:04:05"),
+			Text:      fmt.Sprintf("%s: %s", project.Runtime.Agents[agentIndex].Name(), activity),
+		})
+	}
+
+	m.refreshProjectAndSelection(source.projectIndex)
+	return activitySources
+}
+
 func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 	if m.repository == nil || projectIndex < 0 || projectIndex >= len(m.projects) {
 		return nil
@@ -661,12 +722,7 @@ func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 
 func restorePersistedAgent(name string, persistedState string) agent.AgentContract {
 	a := agent.NewAgent(name)
-	switch persistedState {
-	case agent.Running.String():
-		a.Run(context.Background())
-	case agent.Completed.String():
-		a.Complete()
-	}
+	a.Hydrate(parseAgentState(persistedState))
 	return a
 }
 

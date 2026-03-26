@@ -41,6 +41,23 @@ func TestCompletePublishesOnlyAfterActivation(t *testing.T) {
 	}
 }
 
+func TestHydrateSetsStateWithoutPublishingActivity(t *testing.T) {
+	a := NewAgent("Tester")
+	activityCh := a.SubscribeActivity()
+
+	a.Hydrate(Running)
+	if got := a.State(); got != Running {
+		t.Fatalf("state = %s, want %s", got, Running)
+	}
+	assertNoActivity(t, activityCh)
+
+	a.Hydrate(Completed)
+	if got := a.State(); got != Completed {
+		t.Fatalf("state = %s, want %s", got, Completed)
+	}
+	assertNoActivity(t, activityCh)
+}
+
 func assertActivityType(t *testing.T, ch <-chan eventbus.Event, wantType interface{}) {
 	t.Helper()
 

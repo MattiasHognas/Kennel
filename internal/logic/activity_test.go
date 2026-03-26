@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
 	eventbus "MattiasHognas/Kennel/internal/events"
@@ -70,7 +69,7 @@ func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 	}
 }
 
-func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
+func TestSupervisorSyncAppliesEventWithoutRepositoryRefresh(t *testing.T) {
 	repo := newTestRepository(t)
 	storedProject, err := repo.CreateProject(context.Background(), "Sync Project", `C:\src\sync-project`, "first line\nsecond line")
 	if err != nil {
@@ -92,18 +91,9 @@ func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
 	source := supervisorSource{projectIndex: 0, channel: eb.Subscribe(eventbus.SupervisorTopic)}
 	m.projects[0].Runtime.SupervisorEvents = source.channel
 
-	agentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "planner")
-	if err != nil {
-		t.Fatalf("add agent: %v", err)
-	}
-	if err := repo.UpdateAgentState(context.Background(), agentRecord.ID, agent.Completed.String()); err != nil {
-		t.Fatalf("update agent state: %v", err)
-	}
-	if _, err := repo.NewActivity(context.Background(), storedProject.ID, sql.NullInt64{Int64: agentRecord.ID, Valid: true}, "planner: completed"); err != nil {
-		t.Fatalf("new activity: %v", err)
-	}
 	eb.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.SupervisorSyncEvent{
 		ProjectID: storedProject.ID,
+		AgentID:   42,
 		Agent:     "planner",
 		State:     agent.Completed.String(),
 		Activity:  "completed",
@@ -126,6 +116,9 @@ func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
 	if len(updated.projects[0].Runtime.Agents) != 1 {
 		t.Fatalf("agent count = %d, want 1", len(updated.projects[0].Runtime.Agents))
 	}
+	if len(updated.projects[0].Runtime.AgentIDs) != 1 || updated.projects[0].Runtime.AgentIDs[0] != 42 {
+		t.Fatalf("agent ids = %#v, want [42]", updated.projects[0].Runtime.AgentIDs)
+	}
 	if updated.projects[0].Runtime.Agents[0].Name() != "planner" {
 		t.Fatalf("agent name = %q, want planner", updated.projects[0].Runtime.Agents[0].Name())
 	}
@@ -139,13 +132,18 @@ func TestSupervisorSyncRefreshesProjectFromRepository(t *testing.T) {
 		t.Fatalf("activity source count = %d, want 1", len(updated.Sources))
 	}
 	if updated.Sources[0].channel != updated.projects[0].Runtime.Agents[0].SubscribeActivity() {
-		t.Fatal("activity source was not rebuilt for refreshed agent")
+		t.Fatal("activity source was not built for added agent")
 	}
 
-	updated.projects[0].Runtime.Agents[0].Complete()
-	activity := waitForActivity(updated.Sources[0])()
-	if activity == nil {
-		t.Fatal("expected activity message from refreshed agent source")
+	persistedProject, err := repo.ReadProject(context.Background(), storedProject.ID)
+	if err != nil {
+		t.Fatalf("read project: %v", err)
+	}
+	if len(persistedProject.Agents) != 0 {
+		t.Fatalf("persisted agent count = %d, want 0 to prove no repository refresh", len(persistedProject.Agents))
+	}
+	if len(persistedProject.Activities) != 0 {
+		t.Fatalf("persisted activity count = %d, want 0 to prove no repository refresh", len(persistedProject.Activities))
 	}
 }
 

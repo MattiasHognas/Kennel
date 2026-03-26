@@ -26,6 +26,7 @@ type AgentContract interface {
 	Stop() AgentState
 	Complete() AgentState
 	State() AgentState
+	Hydrate(state AgentState)
 	SubscribeActivity() eventbus.EventChan
 }
 
@@ -90,6 +91,14 @@ func (a *Agent) State() AgentState {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.state
+}
+
+func (a *Agent) Hydrate(state AgentState) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.state = state
+	a.started = state == Running
 }
 
 func (a *Agent) SubscribeActivity() eventbus.EventChan {

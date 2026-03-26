@@ -118,7 +118,7 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 			return s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("add agent %s: %w", plannerTask.Agent, err))
 		}
 		agentStateMap[plannerTask.Agent] = plannerRec
-		s.publishSync(plannerTask.Agent, plannerRec.State, "")
+		s.publishSync(plannerRec, plannerRec.State, "")
 	}
 
 	if plannerRec.State != "completed" {
@@ -429,7 +429,7 @@ func (s *Supervisor) ensurePlanAgents(ctx context.Context, plan Plan, agentMap m
 			return fmt.Errorf("add agent %s: %w", agentName, err)
 		}
 		agentStateMap[agentName] = agentRec
-		s.publishSync(agentName, agentRec.State, "")
+		s.publishSync(agentRec, agentRec.State, "")
 	}
 
 	return nil
@@ -463,7 +463,7 @@ func (s *Supervisor) completeAgent(ctx context.Context, agent repository.Agent, 
 		return err
 	}
 	s.recordAgentActivity(ctx, agent, "completed")
-	s.publishSync(agent.Name, "completed", "completed")
+	s.publishSync(agent, "completed", "completed")
 
 	return nil
 }
@@ -473,7 +473,7 @@ func (s *Supervisor) markAgentRunning(ctx context.Context, agent repository.Agen
 		return err
 	}
 	s.recordAgentActivity(ctx, agent, activity)
-	s.publishSync(agent.Name, "running", activity)
+	s.publishSync(agent, "running", activity)
 
 	return nil
 }
@@ -489,14 +489,15 @@ func (s *Supervisor) recordAgentActivity(ctx context.Context, agent repository.A
 	}
 }
 
-func (s *Supervisor) publishSync(agentName, state, activity string) {
+func (s *Supervisor) publishSync(agent repository.Agent, state, activity string) {
 	if s.EventBus == nil {
 		return
 	}
 
 	s.EventBus.Publish(eventbus.SupervisorTopic, eventbus.Event{Payload: eventbus.SupervisorSyncEvent{
 		ProjectID: s.ProjectID,
-		Agent:     agentName,
+		AgentID:   agent.ID,
+		Agent:     agent.Name,
 		State:     state,
 		Activity:  activity,
 	}})
