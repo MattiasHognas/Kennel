@@ -292,10 +292,47 @@ func TestWrapperPromptPrependsAgentInstructions(t *testing.T) {
 	}
 }
 
-func TestWrapperPromptReturnsErrorWhenAgentProducesNoOutput(t *testing.T) {
+func TestWrapperPromptRetriesOnceAfterEmptyOutput(t *testing.T) {
+	handler := &localClient{}
+	attempts := 0
 	wrapper := &Wrapper{
 		conn: &fakePromptConnection{
 			prompt: func(ctx context.Context, req acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+				attempts++
+				if attempts == 1 {
+					return acpsdk.PromptResponse{}, nil
+				}
+
+				handler.mu.Lock()
+				ch := handler.textChan
+				handler.mu.Unlock()
+				ch <- "review complete"
+				return acpsdk.PromptResponse{}, nil
+			},
+		},
+		handler: handler,
+		topic:   "code-reviewer",
+		session: "session",
+	}
+
+	result, err := wrapper.Prompt(context.Background(), "Review the implementation")
+	if err != nil {
+		t.Fatalf("Prompt returned error: %v", err)
+	}
+	if result != "review complete" {
+		t.Fatalf("Prompt result = %q, want %q", result, "review complete")
+	}
+	if attempts != 2 {
+		t.Fatalf("prompt attempts = %d, want 2", attempts)
+	}
+}
+
+func TestWrapperPromptReturnsErrorWhenAgentProducesNoOutput(t *testing.T) {
+	attempts := 0
+	wrapper := &Wrapper{
+		conn: &fakePromptConnection{
+			prompt: func(ctx context.Context, req acpsdk.PromptRequest) (acpsdk.PromptResponse, error) {
+				attempts++
 				return acpsdk.PromptResponse{}, nil
 			},
 		},
@@ -310,6 +347,9 @@ func TestWrapperPromptReturnsErrorWhenAgentProducesNoOutput(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "agent produced no output") {
 		t.Fatalf("Prompt error = %v, want empty-output failure", err)
+	}
+	if attempts != promptEmptyOutputRetryLimit {
+		t.Fatalf("prompt attempts = %d, want %d", attempts, promptEmptyOutputRetryLimit)
 	}
 }
 

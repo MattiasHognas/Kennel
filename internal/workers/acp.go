@@ -48,6 +48,10 @@ type promptConnection interface {
 	Cancel(ctx context.Context, params acp.CancelNotification) error
 }
 
+const promptEmptyOutputRetryLimit = 2
+
+var errAgentProducedNoOutput = errors.New("agent produced no output")
+
 func logAndWrapAgentError(logger *data.ProjectLogger, agentName, prefix string, err error) error {
 	wrapped := fmt.Errorf("%s: %w", prefix, err)
 	if logger != nil {
@@ -58,6 +62,10 @@ func logAndWrapAgentError(logger *data.ProjectLogger, agentName, prefix string, 
 
 func logAndReturnAgentError(logger *data.ProjectLogger, agentName, message string) error {
 	err := errors.New(message)
+	return logAndReturnError(logger, agentName, err)
+}
+
+func logAndReturnError(logger *data.ProjectLogger, agentName string, err error) error {
 	if logger != nil {
 		logger.LogAgentError(agentName, err.Error())
 	}
@@ -140,8 +148,26 @@ func NewWrapper(ctx context.Context, definition data.AgentDefinition, eb *data.E
 }
 
 func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
-	textChan := make(chan string, 100)
 	promptText := formatPromptWithInstructions(w.instructions, msg)
+	for attempt := 1; attempt <= promptEmptyOutputRetryLimit; attempt++ {
+		result, err := w.promptOnce(ctx, promptText)
+		if err == nil {
+			return result, nil
+		}
+		if !errors.Is(err, errAgentProducedNoOutput) || attempt == promptEmptyOutputRetryLimit || ctx.Err() != nil {
+			return "", err
+		}
+
+		if w.logger != nil {
+			w.logger.LogAgentActivity(w.topic, "empty output received; retrying prompt")
+		}
+	}
+
+	return "", logAndReturnError(w.logger, w.topic, errAgentProducedNoOutput)
+}
+
+func (w *Wrapper) promptOnce(ctx context.Context, promptText string) (string, error) {
+	textChan := make(chan string, 100)
 
 	w.handler.mu.Lock()
 	// Channel to signal and stream text chunks
@@ -180,7 +206,7 @@ func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
 
 	result := sb.String()
 	if result == "" {
-		return "", logAndReturnAgentError(w.logger, w.topic, "agent produced no output")
+		return "", logAndReturnError(w.logger, w.topic, errAgentProducedNoOutput)
 	}
 	return result, nil
 }
