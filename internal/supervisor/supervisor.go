@@ -188,7 +188,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 
 	if plannerRec.State != "completed" {
 		if err := s.completeAgent(ctx, agentStateMap[plannerAgentName], planOutput); err != nil {
-			log.Printf("Failed to persist planner completion: %v", err)
+			s.reportAgentError(plannerTask.Agent, "Failed to persist planner completion: %v", err)
 		} else {
 			plannerRec = agentStateMap[plannerAgentName]
 			plannerRec.Output = planOutput
@@ -229,7 +229,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		s.logAgentOutput(branchSetupTask.Agent, setupOut)
 
 		if err := s.completeAgent(ctx, agentStateMap[branchSetupAgentName], setupOut); err != nil {
-			log.Printf("Failed to persist branch setup completion: %v", err)
+			s.reportAgentError(branchSetupTask.Agent, "Failed to persist branch setup completion: %v", err)
 		} else {
 			branchSetupRec = agentStateMap[branchSetupAgentName]
 			branchSetupRec.Output = setupOut
@@ -275,7 +275,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 
 				if err := s.markAgentRunning(gCtx, agentRec, step.Task); err != nil {
 					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
-						log.Printf("Failed to persist agent failure: %v", failErr)
+						s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
 					}
 					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
 				}
@@ -287,7 +287,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 				wrapper, err := s.AcpFactory(gCtx, def, s.EventBus, s.Workplace, step.Agent)
 				if err != nil {
 					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
-						log.Printf("Failed to persist agent failure: %v", failErr)
+						s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
 					}
 					return fmt.Errorf("launch_failed for %s: %w", step.Agent, err)
 				}
@@ -299,7 +299,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 				if err != nil {
 					wrapper.Close()
 					if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
-						log.Printf("Failed to persist agent failure: %v", failErr)
+						s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
 					}
 					return fmt.Errorf("execution_failed for %s: %w", step.Agent, err)
 				}
@@ -309,7 +309,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 				currentPrompt = out
 
 				if err := s.completeAgent(gCtx, agentRec, currentPrompt); err != nil {
-					log.Printf("Failed to persist agent completion: %v", err)
+					s.reportAgentError(step.Agent, "Failed to persist agent completion: %v", err)
 				} else {
 					agentRec.Output = currentPrompt
 					agentRec.State = "completed"
@@ -543,7 +543,7 @@ func (s *Supervisor) recordAgentActivity(ctx context.Context, agent repository.A
 	s.logAgentActivity(agent.Name, activity)
 
 	if _, err := s.Repo.NewActivity(ctx, s.ProjectID, sql.NullInt64{Int64: agent.ID, Valid: agent.ID > 0}, fmt.Sprintf("%s: %s", agent.Name, activity)); err != nil {
-		log.Printf("Failed to persist activity: %v", err)
+		s.reportAgentError(agent.Name, "Failed to persist activity: %v", err)
 	}
 }
 
@@ -568,7 +568,7 @@ func (s *Supervisor) publishPlan(plan Plan) {
 
 	encodedPlan, err := json.Marshal(plan)
 	if err != nil {
-		log.Printf("Failed to marshal plan update: %v", err)
+		s.reportProjectError("Failed to marshal plan update: %v", err)
 		return
 	}
 
@@ -602,7 +602,7 @@ func parsePlanJSON(rawJSON string) (Plan, error) {
 func (s *Supervisor) failStop(ctx context.Context, stepIndex int, status string, originalErr error) error {
 	if s.Repo != nil {
 		if err := s.Repo.UpdateProjectState(ctx, s.ProjectID, "stopped"); err != nil {
-			log.Printf("Failed to persist stopped project state: %v", err)
+			s.reportProjectError("Failed to persist stopped project state: %v", err)
 		}
 	}
 	if s.Logger != nil {
@@ -619,9 +619,25 @@ func (s *Supervisor) failStop(ctx context.Context, stepIndex int, status string,
 
 func (s *Supervisor) failAgentAndStop(ctx context.Context, agent repository.Agent, stepIndex int, status string, originalErr error) error {
 	if err := s.markAgentFailed(ctx, agent, originalErr); err != nil {
-		log.Printf("Failed to persist agent failure: %v", err)
+		s.reportAgentError(agent.Name, "Failed to persist agent failure: %v", err)
 	}
 	return s.failStop(ctx, stepIndex, status, originalErr)
+}
+
+func (s *Supervisor) reportProjectError(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	if s.Logger != nil {
+		s.Logger.LogProjectError(message)
+	}
+	log.Printf("%s", message)
+}
+
+func (s *Supervisor) reportAgentError(agentName, format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	if s.Logger != nil {
+		s.Logger.LogAgentError(agentName, message)
+	}
+	log.Printf("%s", message)
 }
 
 func (s *Supervisor) logAgentCreated(agentName string) {

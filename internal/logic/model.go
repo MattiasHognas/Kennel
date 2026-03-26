@@ -659,7 +659,7 @@ func (m *Model) persistProjectState(project *Project) {
 	}
 
 	if err := m.repository.UpdateProjectState(context.Background(), project.Config.ProjectID, project.State.State.String()); err != nil {
-		fmt.Fprintf(os.Stderr, "persist project state: %v\n", err)
+		m.reportProjectError(project, "persist project state", err)
 	}
 }
 
@@ -682,7 +682,7 @@ func (m *Model) persistProjectAgentStates(project *Project) {
 		}
 
 		if err := m.repository.UpdateAgentState(context.Background(), agentID, project.Runtime.Agents[i].State().String()); err != nil {
-			fmt.Fprintf(os.Stderr, "persist agent state: %v\n", err)
+			m.reportAgentError(project, project.Runtime.Agents[i].Name(), "persist agent state", err)
 		}
 	}
 }
@@ -708,8 +708,34 @@ func (m *Model) persistActivity(project *Project, agentIndex int, text string) {
 	}
 
 	if _, err := m.repository.NewActivity(context.Background(), project.Config.ProjectID, agentID, text); err != nil {
-		fmt.Fprintf(os.Stderr, "persist activity: %v\n", err)
+		if agentIndex >= 0 && agentIndex < len(project.Runtime.Agents) {
+			m.reportAgentError(project, project.Runtime.Agents[agentIndex].Name(), "persist activity", err)
+		} else {
+			m.reportProjectError(project, "persist activity", err)
+		}
 	}
+}
+
+func (m *Model) reportProjectError(project *Project, action string, err error) {
+	if err == nil {
+		return
+	}
+	message := fmt.Sprintf("%s: %v", action, err)
+	if logger := m.ensureProjectLogger(project); logger != nil {
+		logger.LogProjectError(message)
+	}
+	fmt.Fprintf(os.Stderr, "%s\n", message)
+}
+
+func (m *Model) reportAgentError(project *Project, agentName, action string, err error) {
+	if err == nil {
+		return
+	}
+	message := fmt.Sprintf("%s: %v", action, err)
+	if logger := m.ensureProjectLogger(project); logger != nil {
+		logger.LogAgentError(agentName, message)
+	}
+	fmt.Fprintf(os.Stderr, "%s [%s]\n", message, agentName)
 }
 
 func (m *Model) ensureProjectLogger(project *Project) *logging.ProjectLogger {
@@ -822,7 +848,7 @@ func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 
 	storedProject, err := m.repository.ReadProject(context.Background(), project.Config.ProjectID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sync project from repository: %v\n", err)
+		m.reportProjectError(project, "sync project from repository", err)
 		return nil
 	}
 

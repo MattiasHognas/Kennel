@@ -2,9 +2,13 @@ package model
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	eventbus "MattiasHognas/Kennel/internal/events"
+	logging "MattiasHognas/Kennel/internal/logging"
 	"MattiasHognas/Kennel/internal/ui/table"
 	agent "MattiasHognas/Kennel/internal/workers"
 )
@@ -159,5 +163,49 @@ func TestWaitForSupervisorUpdateStopsOnCancellation(t *testing.T) {
 	msg := waitForSupervisorUpdate(source)()
 	if _, ok := msg.(supervisorCompletedMsg); !ok {
 		t.Fatalf("message = %#v, want supervisorCompletedMsg", msg)
+	}
+}
+
+func TestPersistProjectStateLogsRepositoryFailure(t *testing.T) {
+	repo := newTestRepository(t)
+	storedProject, err := repo.CreateProject(context.Background(), "Logging Project", `C:\src\logging-project`, "instructions")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatalf("close repository: %v", err)
+	}
+
+	logRoot := t.TempDir()
+	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
+		Config: ProjectConfig{
+			ProjectID: storedProject.ID,
+			Name:      storedProject.Name,
+		},
+		State: ProjectState{State: agent.Running},
+		Runtime: ProjectRuntime{
+			Logger: logging.NewProjectLogger(logRoot, storedProject.ID, storedProject.Name),
+		},
+	}}, repo)
+
+	m.persistProjectState(&m.projects[0])
+
+	entries, readErr := os.ReadDir(filepath.Join(logRoot, "logs"))
+	if readErr != nil {
+		t.Fatalf("ReadDir returned error: %v", readErr)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("log entry count = %d, want 1", len(entries))
+	}
+
+	content, readErr := os.ReadFile(filepath.Join(logRoot, "logs", entries[0].Name()))
+	if readErr != nil {
+		t.Fatalf("ReadFile returned error: %v", readErr)
+	}
+	text := string(content)
+	for _, fragment := range []string{"PROJECT_STATE", "PROJECT_ERROR", "persist project state"} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("project log missing %q:\n%s", fragment, text)
+		}
 	}
 }
