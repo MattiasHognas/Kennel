@@ -6,9 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
+	"MattiasHognas/Kennel/internal/discovery"
 	eventbus "MattiasHognas/Kennel/internal/events"
 
 	"github.com/coder/acp-go-sdk"
@@ -38,9 +42,10 @@ type Wrapper struct {
 	session acp.SessionId
 }
 
-func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (*Wrapper, error) {
-	cmd := exec.CommandContext(ctx, binary, args...)
+func NewWrapper(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (*Wrapper, error) {
+	cmd := exec.CommandContext(ctx, definition.LaunchConfig.Binary, definition.LaunchConfig.Args...)
 	cmd.Dir = workplace
+	cmd.Env = appendCommandEnv(definition.LaunchConfig.Env)
 
 	inw, err := cmd.StdinPipe()
 	if err != nil {
@@ -59,10 +64,11 @@ func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.
 	}
 
 	handler := &localClient{
-		eb:        eb,
-		topic:     topic,
-		workplace: workplace,
-		terminals: make(map[string]*terminalState),
+		eb:          eb,
+		topic:       topic,
+		workplace:   workplace,
+		permissions: definition.Permissions,
+		terminals:   make(map[string]*terminalState),
 	}
 	conn := acp.NewClientSideConnection(handler, inw, outr)
 
@@ -76,7 +82,12 @@ func NewWrapper(ctx context.Context, binary string, args []string, eb *eventbus.
 		return nil, fmt.Errorf("init: %w", err)
 	}
 
-	sessionRes, err := conn.NewSession(ctx, acp.NewSessionRequest{McpServers: []acp.McpServer{}})
+	mcpServers, err := buildMCPServers(definition.MCPServers)
+	if err != nil {
+		return nil, fmt.Errorf("build mcp servers: %w", err)
+	}
+
+	sessionRes, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: workplace, McpServers: mcpServers})
 	if err != nil {
 		return nil, fmt.Errorf("session: %w", err)
 	}
@@ -158,6 +169,99 @@ func FormatPrompt(msg string, activities []string) string {
 	return sb.String()
 }
 
+func appendCommandEnv(overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return nil
+	}
+
+	env := os.Environ()
+	for key, value := range overrides {
+		env = append(env, key+"="+value)
+	}
+
+	return env
+}
+
+func buildMCPServers(configs []discovery.MCPServer) ([]acp.McpServer, error) {
+	if len(configs) == 0 {
+		return nil, nil
+	}
+
+	servers := make([]acp.McpServer, 0, len(configs))
+	for _, config := range configs {
+		switch config.Transport {
+		case "stdio":
+			servers = append(servers, acp.McpServer{
+				Stdio: &acp.McpServerStdio{
+					Name:    config.Name,
+					Command: config.Command,
+					Args:    append([]string(nil), config.Args...),
+					Env:     mapEnvVariables(config.Env),
+				},
+			})
+		case "http":
+			servers = append(servers, acp.McpServer{
+				Http: &acp.McpServerHttp{
+					Name:    config.Name,
+					Type:    "http",
+					Url:     config.URL,
+					Headers: mapHTTPHeaders(config.Headers),
+				},
+			})
+		case "sse":
+			servers = append(servers, acp.McpServer{
+				Sse: &acp.McpServerSse{
+					Name:    config.Name,
+					Type:    "sse",
+					Url:     config.URL,
+					Headers: mapHTTPHeaders(config.Headers),
+				},
+			})
+		default:
+			return nil, fmt.Errorf("unsupported mcp transport %q", config.Transport)
+		}
+	}
+
+	return servers, nil
+}
+
+func mapEnvVariables(values map[string]string) []acp.EnvVariable {
+	if len(values) == 0 {
+		return nil
+	}
+
+	keys := sortedKeys(values)
+	result := make([]acp.EnvVariable, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, acp.EnvVariable{Name: key, Value: values[key]})
+	}
+
+	return result
+}
+
+func mapHTTPHeaders(values map[string]string) []acp.HttpHeader {
+	if len(values) == 0 {
+		return nil
+	}
+
+	keys := sortedKeys(values)
+	result := make([]acp.HttpHeader, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, acp.HttpHeader{Name: key, Value: values[key]})
+	}
+
+	return result
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 type terminalState struct {
 	cmd      *exec.Cmd
 	mu       sync.Mutex
@@ -200,11 +304,12 @@ func (t *terminalState) exitResult() (*int, error) {
 }
 
 type localClient struct {
-	mu        sync.Mutex
-	eb        *eventbus.EventBus
-	topic     string
-	workplace string
-	textChan  chan string
+	mu          sync.Mutex
+	eb          *eventbus.EventBus
+	topic       string
+	workplace   string
+	textChan    chan string
+	permissions discovery.PermissionsConfig
 
 	terminalsMu sync.Mutex
 	terminals   map[string]*terminalState
@@ -302,8 +407,14 @@ func (c *localClient) ReadTextFile(ctx context.Context, params acp.ReadTextFileR
 	if err != nil {
 		return acp.ReadTextFileResponse{}, fmt.Errorf("validation failed: %w", err)
 	}
+	if err := c.checkACPToolPermission(acpToolReadTextFile); err != nil {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+	}
 	resolvedPath, err := c.checkInWorkplace(params.Path)
 	if err != nil {
+		return acp.ReadTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+	}
+	if err := c.checkPathPermissions(resolvedPath); err != nil {
 		return acp.ReadTextFileResponse{}, fmt.Errorf("access denied: %w", err)
 	}
 	content, err := os.ReadFile(resolvedPath)
@@ -318,8 +429,14 @@ func (c *localClient) WriteTextFile(ctx context.Context, params acp.WriteTextFil
 	if err != nil {
 		return acp.WriteTextFileResponse{}, fmt.Errorf("validation failed: %w", err)
 	}
+	if err := c.checkACPToolPermission(acpToolWriteTextFile); err != nil {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+	}
 	resolvedPath, err := c.checkInWorkplace(params.Path)
 	if err != nil {
+		return acp.WriteTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+	}
+	if err := c.checkPathPermissions(resolvedPath); err != nil {
 		return acp.WriteTextFileResponse{}, fmt.Errorf("access denied: %w", err)
 	}
 	err = os.WriteFile(resolvedPath, []byte(params.Content), 0644)
@@ -333,6 +450,9 @@ func (c *localClient) RequestPermission(ctx context.Context, params acp.RequestP
 	err := params.Validate()
 	if err != nil {
 		return acp.RequestPermissionResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	if err := c.checkACPToolPermission(acpToolRequestPermission); err != nil {
+		return acp.RequestPermissionResponse{}, fmt.Errorf("access denied: %w", err)
 	}
 	var permissionOption *acp.PermissionOption
 	for _, option := range params.Options {
@@ -351,6 +471,12 @@ func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTermi
 	err := params.Validate()
 	if err != nil {
 		return acp.CreateTerminalResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	if err := c.checkACPToolPermission(acpToolCreateTerminal); err != nil {
+		return acp.CreateTerminalResponse{}, fmt.Errorf("access denied: %w", err)
+	}
+	if err := c.checkTerminalPermissions(params.Command, params.Args); err != nil {
+		return acp.CreateTerminalResponse{}, fmt.Errorf("access denied: %w", err)
 	}
 	terminalCmd := exec.Command(params.Command, params.Args...)
 	terminalCmd.Dir = c.workplace
@@ -376,6 +502,9 @@ func (c *localClient) KillTerminalCommand(ctx context.Context, params acp.KillTe
 	if err != nil {
 		return acp.KillTerminalCommandResponse{}, fmt.Errorf("validation failed: %w", err)
 	}
+	if err := c.checkACPToolPermission(acpToolKillTerminal); err != nil {
+		return acp.KillTerminalCommandResponse{}, fmt.Errorf("access denied: %w", err)
+	}
 	c.terminalsMu.Lock()
 	state, exists := c.terminals[params.TerminalId]
 	c.terminalsMu.Unlock()
@@ -396,6 +525,9 @@ func (c *localClient) TerminalOutput(ctx context.Context, params acp.TerminalOut
 	if err != nil {
 		return acp.TerminalOutputResponse{}, fmt.Errorf("validation failed: %w", err)
 	}
+	if err := c.checkACPToolPermission(acpToolTerminalOutput); err != nil {
+		return acp.TerminalOutputResponse{}, fmt.Errorf("access denied: %w", err)
+	}
 	c.terminalsMu.Lock()
 	state, exists := c.terminals[params.TerminalId]
 	c.terminalsMu.Unlock()
@@ -410,6 +542,9 @@ func (c *localClient) ReleaseTerminal(ctx context.Context, params acp.ReleaseTer
 	err := params.Validate()
 	if err != nil {
 		return acp.ReleaseTerminalResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	if err := c.checkACPToolPermission(acpToolReleaseTerminal); err != nil {
+		return acp.ReleaseTerminalResponse{}, fmt.Errorf("access denied: %w", err)
 	}
 	c.terminalsMu.Lock()
 	_, exists := c.terminals[params.TerminalId]
@@ -427,6 +562,9 @@ func (c *localClient) WaitForTerminalExit(ctx context.Context, params acp.WaitFo
 	err := params.Validate()
 	if err != nil {
 		return acp.WaitForTerminalExitResponse{}, fmt.Errorf("validation failed: %w", err)
+	}
+	if err := c.checkACPToolPermission(acpToolWaitForTerminal); err != nil {
+		return acp.WaitForTerminalExitResponse{}, fmt.Errorf("access denied: %w", err)
 	}
 	c.terminalsMu.Lock()
 	state, exists := c.terminals[params.TerminalId]
@@ -448,4 +586,192 @@ func (c *localClient) WaitForTerminalExit(ctx context.Context, params acp.WaitFo
 		}
 	}
 	return acp.WaitForTerminalExitResponse{}, nil
+}
+
+func (c *localClient) checkPathPermissions(resolvedPath string) error {
+	if c.permissions.Git.Status && c.permissions.Git.Diff && c.permissions.Git.History {
+		return nil
+	}
+
+	relPath, err := filepath.Rel(c.workplace, resolvedPath)
+	if err != nil {
+		return err
+	}
+
+	segments := strings.Split(filepath.Clean(relPath), string(filepath.Separator))
+	for _, segment := range segments {
+		if segment == ".git" {
+			return fmt.Errorf("git metadata is hidden for this agent")
+		}
+	}
+
+	return nil
+}
+
+type acpToolPermission string
+
+const (
+	acpToolReadTextFile      acpToolPermission = "readTextFile"
+	acpToolWriteTextFile     acpToolPermission = "writeTextFile"
+	acpToolRequestPermission acpToolPermission = "requestPermission"
+	acpToolCreateTerminal    acpToolPermission = "createTerminal"
+	acpToolKillTerminal      acpToolPermission = "killTerminal"
+	acpToolTerminalOutput    acpToolPermission = "terminalOutput"
+	acpToolReleaseTerminal   acpToolPermission = "releaseTerminal"
+	acpToolWaitForTerminal   acpToolPermission = "waitForTerminal"
+)
+
+func (c *localClient) checkACPToolPermission(tool acpToolPermission) error {
+	allowed := false
+
+	switch tool {
+	case acpToolReadTextFile:
+		allowed = c.permissions.ACP.ReadTextFile
+	case acpToolWriteTextFile:
+		allowed = c.permissions.ACP.WriteTextFile
+	case acpToolRequestPermission:
+		allowed = c.permissions.ACP.RequestPermission
+	case acpToolCreateTerminal:
+		allowed = c.permissions.ACP.CreateTerminal
+	case acpToolKillTerminal:
+		allowed = c.permissions.ACP.KillTerminal
+	case acpToolTerminalOutput:
+		allowed = c.permissions.ACP.TerminalOutput
+	case acpToolReleaseTerminal:
+		allowed = c.permissions.ACP.ReleaseTerminal
+	case acpToolWaitForTerminal:
+		allowed = c.permissions.ACP.WaitForTerminal
+	default:
+		return fmt.Errorf("unknown acp tool permission %q", tool)
+	}
+
+	if allowed {
+		return nil
+	}
+
+	return fmt.Errorf("acp tool %s is disabled for this agent", tool)
+}
+
+func (c *localClient) checkTerminalPermissions(command string, args []string) error {
+	git := c.permissions.Git
+	if git.Status && git.Diff && git.History {
+		return nil
+	}
+
+	classifications := classifyGitInvocations(command, args)
+	for _, class := range classifications {
+		switch class {
+		case gitCommandStatus:
+			if !git.Status {
+				return fmt.Errorf("git status access is disabled for this agent")
+			}
+		case gitCommandDiff:
+			if !git.Diff {
+				return fmt.Errorf("git diff access is disabled for this agent")
+			}
+		case gitCommandHistory, gitCommandUnknown:
+			if !git.History {
+				return fmt.Errorf("git history access is disabled for this agent")
+			}
+		}
+	}
+
+	return nil
+}
+
+type gitCommandClass string
+
+const (
+	gitCommandStatus  gitCommandClass = "status"
+	gitCommandDiff    gitCommandClass = "diff"
+	gitCommandHistory gitCommandClass = "history"
+	gitCommandUnknown gitCommandClass = "unknown"
+)
+
+var gitShellInvocationPattern = regexp.MustCompile(`(?i)(?:^|[^\w])git(?:\.exe)?\s+((?:--?[\w-]+(?:\s+[^;&|]+)?\s+)*)?([\w-]+)`)
+
+func classifyGitInvocations(command string, args []string) []gitCommandClass {
+	base := strings.ToLower(filepath.Base(command))
+	if runtime.GOOS == "windows" {
+		base = strings.TrimSuffix(base, ".exe")
+	}
+
+	if base == "git" {
+		subcommand := extractGitSubcommand(args)
+		if subcommand == "" {
+			return []gitCommandClass{gitCommandUnknown}
+		}
+		return []gitCommandClass{classifyGitSubcommand(subcommand)}
+	}
+
+	if !isShellCommand(base) {
+		return nil
+	}
+
+	joined := strings.Join(args, " ")
+	matches := gitShellInvocationPattern.FindAllStringSubmatch(joined, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	classifications := make([]gitCommandClass, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 3 {
+			classifications = append(classifications, gitCommandUnknown)
+			continue
+		}
+		classifications = append(classifications, classifyGitSubcommand(match[2]))
+	}
+
+	return classifications
+}
+
+func extractGitSubcommand(args []string) string {
+	flagsWithValue := map[string]struct{}{
+		"-c":          {},
+		"-C":          {},
+		"--exec-path": {},
+		"--git-dir":   {},
+		"--work-tree": {},
+	}
+
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "" {
+			continue
+		}
+		if _, ok := flagsWithValue[arg]; ok {
+			index++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+
+	return ""
+}
+
+func classifyGitSubcommand(subcommand string) gitCommandClass {
+	switch strings.ToLower(strings.TrimSpace(subcommand)) {
+	case "status":
+		return gitCommandStatus
+	case "diff", "difftool":
+		return gitCommandDiff
+	case "log", "show", "blame", "reflog", "rev-list", "shortlog", "whatchanged", "rev-parse", "show-ref", "cat-file", "ls-tree":
+		return gitCommandHistory
+	default:
+		return gitCommandUnknown
+	}
+}
+
+func isShellCommand(base string) bool {
+	base = strings.TrimSuffix(base, ".exe")
+	switch base {
+	case "cmd", "powershell", "pwsh", "bash", "sh", "zsh":
+		return true
+	default:
+		return false
+	}
 }

@@ -41,7 +41,7 @@ internal/
 
 - **Go 1.26+**
 - An ACP-compatible agent binary (the default configuration expects a `copilot`
-  binary on `PATH` — see `agents/cli.json`).
+   binary on `PATH` — see `agents/default.json`).
 
 ## Getting Started
 
@@ -85,7 +85,9 @@ then tab to `[ OK ]` and press `enter` to save.
 
 Agents are discovered from the `agents/` directory at the location of the
 executable. Each agent is a sub-directory containing an `instructions.md` file.
-An optional `agent.json` can override the default launch configuration.
+An optional `agent.json` can override the default launch configuration and
+declare per-agent MCP servers and visibility rules. The global `agents/default.json`
+uses the same schema and provides defaults for every agent.
 
 ### Pre-configured agents
 
@@ -104,7 +106,159 @@ An optional `agent.json` can override the default launch configuration.
 
 1. Create a new directory under `agents/`, e.g. `agents/my-agent/`.
 2. Add an `instructions.md` with the agent's system prompt.
-3. Optionally add an `agent.json` to override the launch binary/args.
+3. Optionally add an `agent.json` to override the launch binary/args, attach
+    MCP servers, or restrict prompt and git visibility.
+
+Each `agent.json` can override `binary`, `args`, and `env` independently from
+`agents/default.json`, so one agent can use a different ACP-compatible runtime
+without affecting the rest.
+
+### Agent configuration schema
+
+`agents/default.json` and `agents/<name>/agent.json` share the same flat JSON
+shape. Existing `binary`, `args`, and `env` fields still work.
+
+```json
+{
+   "binary": "copilot",
+   "args": ["--acp"],
+   "env": {
+      "COPILOT_LOG_LEVEL": "debug"
+   },
+   "promptContext": {
+      "previousOutput": true
+   },
+   "permissions": {
+      "git": {
+         "status": true,
+         "diff": true,
+         "history": true
+      },
+      "acp": {
+         "readTextFile": true,
+         "writeTextFile": true,
+         "requestPermission": true,
+         "createTerminal": true,
+         "killTerminal": true,
+         "terminalOutput": true,
+         "releaseTerminal": true,
+         "waitForTerminal": true
+      }
+   },
+   "mcpServers": [
+      {
+         "transport": "stdio",
+         "name": "playwright",
+         "command": "npx",
+         "args": ["@playwright/mcp@latest"]
+      }
+   ]
+}
+```
+
+`promptContext.previousOutput` controls whether the supervisor includes the
+previous agent's output in the next task prompt.
+
+`permissions.git` controls ACP tool access to git metadata:
+
+- `status`: allows `git status`
+- `diff`: allows `git diff`
+- `history`: allows history-style commands such as `git log`, `git show`, and direct `.git` reads
+
+`permissions.acp` controls which ACP methods the agent can call at all:
+
+- `readTextFile`: allows workspace file reads
+- `writeTextFile`: allows workspace file writes
+- `requestPermission`: allows approval requests
+- `createTerminal`: allows starting terminal commands
+- `killTerminal`: allows terminating a tracked terminal
+- `terminalOutput`: allows reading tracked terminal output
+- `releaseTerminal`: allows dropping a tracked terminal handle
+- `waitForTerminal`: allows waiting for terminal completion
+
+`mcpServers` supports these transports:
+
+- `stdio`: requires `name` and `command`; optional `args` and `env`
+- `http`: requires `name` and `url`; optional `headers`
+- `sse`: requires `name` and `url`; optional `headers`
+
+### Example: isolate the tester
+
+```json
+{
+   "promptContext": {
+      "previousOutput": false
+   },
+   "permissions": {
+      "git": {
+         "status": false,
+         "diff": false,
+         "history": false
+      }
+   }
+}
+```
+
+### Example: planner with no ACP tool access
+
+```json
+{
+   "binary": "copilot",
+   "args": ["--acp"],
+   "promptContext": {
+      "previousOutput": false
+   },
+   "permissions": {
+      "git": {
+         "status": false,
+         "diff": false,
+         "history": false
+      },
+      "acp": {
+         "readTextFile": false,
+         "writeTextFile": false,
+         "requestPermission": false,
+         "createTerminal": false,
+         "killTerminal": false,
+         "terminalOutput": false,
+         "releaseTerminal": false,
+         "waitForTerminal": false
+      }
+   }
+}
+```
+
+### Example: frontend agent with Playwright MCP
+
+```json
+{
+   "mcpServers": [
+      {
+         "transport": "stdio",
+         "name": "context7",
+         "command": "npx",
+         "args": ["-y", "@upstash/context7-mcp"]
+      },
+      {
+         "transport": "stdio",
+         "name": "playwright",
+         "command": "npx",
+         "args": ["@playwright/mcp@latest"]
+      }
+   ]
+}
+```
+
+### Suggested MCP pairings
+
+- `backend-developer`: add a docs-oriented MCP such as `context7` for .NET and ASP.NET Core references
+- `frontend-developer`: combine `context7` for React docs with `playwright` for browser verification
+- `tester`: keep `playwright` for UI and E2E validation; add API-specific tooling only if the target stack has one
+- `code-reviewer`: usually no extra MCP is needed beyond repo access; if added, prefer read-focused docs/search tooling over execution-heavy tooling
+- `docs-writer`: `context7` is useful for pulling framework and library reference material while writing docs
+- `devops`: consider Docker, Kubernetes, Terraform, or cloud-provider MCPs only if those runtimes are already standard in your projects
+- `branch-setup`: avoid extra MCPs unless you want issue-tracker or ticket-system integration
+- `planner`: keep isolated unless you explicitly want it to reason over external specs or trackers
 
 ## Development
 

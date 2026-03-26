@@ -50,10 +50,10 @@ type ACPClient interface {
 	Close() error
 }
 
-type ACPFactory func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (ACPClient, error)
+type ACPFactory func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (ACPClient, error)
 
-func DefaultACPFactory(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (ACPClient, error) {
-	return acp.NewWrapper(ctx, binary, args, eb, workplace, topic)
+func DefaultACPFactory(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (ACPClient, error) {
+	return acp.NewWrapper(ctx, definition, eb, workplace, topic)
 }
 
 type Supervisor struct {
@@ -128,7 +128,7 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 		plannerRec.State = "running"
 		agentStateMap[plannerTask.Agent] = plannerRec
 
-		plannerWrapper, err := s.AcpFactory(ctx, plannerDef.LaunchConfig.Binary, plannerDef.LaunchConfig.Args, s.EventBus, s.Workplace, "planner")
+		plannerWrapper, err := s.AcpFactory(ctx, plannerDef, s.EventBus, s.Workplace, "planner")
 		if err != nil {
 			return s.failStop(ctx, 0, "planning_launch_failed", err)
 		}
@@ -206,12 +206,12 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		branchSetupRec.State = "running"
 		agentStateMap[branchSetupTask.Agent] = branchSetupRec
 
-		setupWrapper, err := s.AcpFactory(ctx, branchSetupDef.LaunchConfig.Binary, branchSetupDef.LaunchConfig.Args, s.EventBus, s.Workplace, branchSetupTask.Agent)
+		setupWrapper, err := s.AcpFactory(ctx, branchSetupDef, s.EventBus, s.Workplace, branchSetupTask.Agent)
 		if err != nil {
 			return s.failStop(ctx, 1, "launch_failed", err)
 		}
 
-		setupOut, err = setupWrapper.Prompt(ctx, fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", branchSetupTask.Task, rawJSON))
+		setupOut, err = setupWrapper.Prompt(ctx, buildTaskPrompt(branchSetupTask.Task, rawJSON, branchSetupDef.PromptContext.PreviousOutput))
 		setupWrapper.Close()
 		if err != nil {
 			return s.failStop(ctx, 1, "execution_failed", err)
@@ -268,12 +268,12 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 				agentStateMap[step.Agent] = agentRec
 				agentStateMu.Unlock()
 
-				wrapper, err := s.AcpFactory(gCtx, def.LaunchConfig.Binary, def.LaunchConfig.Args, s.EventBus, s.Workplace, step.Agent)
+				wrapper, err := s.AcpFactory(gCtx, def, s.EventBus, s.Workplace, step.Agent)
 				if err != nil {
 					return fmt.Errorf("launch_failed for %s: %w", step.Agent, err)
 				}
 
-				promptContext := fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", step.Task, currentPrompt)
+				promptContext := buildTaskPrompt(step.Task, currentPrompt, def.PromptContext.PreviousOutput)
 				out, err := wrapper.Prompt(gCtx, promptContext)
 				if err != nil {
 					wrapper.Close()
@@ -453,6 +453,14 @@ func collectRequiredAgents(plan Plan) []string {
 	}
 
 	return requiredAgents
+}
+
+func buildTaskPrompt(task string, previousOutput string, includePreviousOutput bool) string {
+	if !includePreviousOutput || strings.TrimSpace(previousOutput) == "" {
+		return fmt.Sprintf("Task: %s", task)
+	}
+
+	return fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", task, previousOutput)
 }
 
 func (s *Supervisor) completeAgent(ctx context.Context, agent repository.Agent, output string) error {

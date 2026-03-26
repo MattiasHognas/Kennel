@@ -7,9 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"MattiasHognas/Kennel/internal/discovery"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 )
@@ -88,7 +91,11 @@ func TestTerminalHelperProcess(t *testing.T) {
 }
 
 func TestRequestPermissionWithoutAllowOnceReturnsCancelled(t *testing.T) {
-	client := &localClient{}
+	client := &localClient{
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{RequestPermission: true},
+		},
+	}
 
 	resp, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
 		SessionId: "session",
@@ -107,9 +114,38 @@ func TestRequestPermissionWithoutAllowOnceReturnsCancelled(t *testing.T) {
 	}
 }
 
+func TestRequestPermissionBlocksWhenACPToolIsDisabled(t *testing.T) {
+	client := &localClient{
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{RequestPermission: false},
+		},
+	}
+
+	_, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
+		SessionId: "session",
+		ToolCall:  acpsdk.RequestPermissionToolCall{ToolCallId: "tool-call"},
+		Options: []acpsdk.PermissionOption{{
+			OptionId: "allow",
+			Name:     "Allow once",
+			Kind:     acpsdk.PermissionOptionKindAllowOnce,
+		}},
+	})
+	if err == nil {
+		t.Fatal("RequestPermission returned nil error, want acp tool denial")
+	}
+	if !strings.Contains(err.Error(), "requestPermission") {
+		t.Fatalf("RequestPermission error = %v, want requestPermission denial", err)
+	}
+}
+
 func TestWriteTextFileResolvesRelativePathsWithinWorkplace(t *testing.T) {
 	workplace := t.TempDir()
-	client := &localClient{workplace: workplace}
+	client := &localClient{
+		workplace: workplace,
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{ReadTextFile: true, WriteTextFile: true},
+		},
+	}
 
 	_, err := client.WriteTextFile(context.Background(), acpsdk.WriteTextFileRequest{
 		Path:    "todo.txt",
@@ -128,6 +164,26 @@ func TestWriteTextFileResolvesRelativePathsWithinWorkplace(t *testing.T) {
 	}
 }
 
+func TestWriteTextFileBlocksWhenACPToolIsDisabled(t *testing.T) {
+	client := &localClient{
+		workplace: t.TempDir(),
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{WriteTextFile: false},
+		},
+	}
+
+	_, err := client.WriteTextFile(context.Background(), acpsdk.WriteTextFileRequest{
+		Path:    "todo.txt",
+		Content: "hello",
+	})
+	if err == nil {
+		t.Fatal("WriteTextFile returned nil error, want acp tool denial")
+	}
+	if !strings.Contains(err.Error(), "writeTextFile") {
+		t.Fatalf("WriteTextFile error = %v, want writeTextFile denial", err)
+	}
+}
+
 func TestReadTextFileRejectsSymlinkEscape(t *testing.T) {
 	workplace := t.TempDir()
 	outside := t.TempDir()
@@ -142,7 +198,12 @@ func TestReadTextFileRejectsSymlinkEscape(t *testing.T) {
 		t.Fatalf("Symlink returned error: %v", err)
 	}
 
-	client := &localClient{workplace: workplace}
+	client := &localClient{
+		workplace: workplace,
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{ReadTextFile: true},
+		},
+	}
 	_, err := client.ReadTextFile(context.Background(), acpsdk.ReadTextFileRequest{
 		Path: filepath.Join("linked", "secret.txt"),
 	})
@@ -152,7 +213,13 @@ func TestReadTextFileRejectsSymlinkEscape(t *testing.T) {
 }
 
 func TestWaitForTerminalExitRespectsContext(t *testing.T) {
-	client := &localClient{workplace: t.TempDir(), terminals: make(map[string]*terminalState)}
+	client := &localClient{
+		workplace: t.TempDir(),
+		terminals: make(map[string]*terminalState),
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{CreateTerminal: true, KillTerminal: true, WaitForTerminal: true},
+		},
+	}
 	command, args := terminalHelperCommand(t, "sleep", "1s")
 
 	created, err := client.CreateTerminal(context.Background(), acpsdk.CreateTerminalRequest{
@@ -177,7 +244,13 @@ func TestWaitForTerminalExitRespectsContext(t *testing.T) {
 }
 
 func TestWaitForTerminalExitUsesRecordedExitStatusAndReleaseRemovesTerminal(t *testing.T) {
-	client := &localClient{workplace: t.TempDir(), terminals: make(map[string]*terminalState)}
+	client := &localClient{
+		workplace: t.TempDir(),
+		terminals: make(map[string]*terminalState),
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{CreateTerminal: true, TerminalOutput: true, ReleaseTerminal: true, WaitForTerminal: true},
+		},
+	}
 	command, args := terminalHelperCommand(t, "emit-exit", "output", "7")
 
 	created, err := client.CreateTerminal(context.Background(), acpsdk.CreateTerminalRequest{
@@ -209,5 +282,156 @@ func TestWaitForTerminalExitUsesRecordedExitStatusAndReleaseRemovesTerminal(t *t
 	}
 	if _, err := client.TerminalOutput(context.Background(), acpsdk.TerminalOutputRequest{TerminalId: created.TerminalId}); err == nil {
 		t.Fatal("TerminalOutput returned nil error after release, want invalid terminal ID")
+	}
+}
+
+func TestBuildMCPServersMapsTransportsAndMetadata(t *testing.T) {
+	servers, err := buildMCPServers([]discovery.MCPServer{
+		{
+			Transport: "stdio",
+			Name:      "playwright",
+			Command:   "npx",
+			Args:      []string{"@playwright/mcp@latest"},
+			Env:       map[string]string{"DEBUG": "1"},
+		},
+		{
+			Transport: "http",
+			Name:      "language",
+			URL:       "https://mcp.example.test/http",
+			Headers:   map[string]string{"Authorization": "Bearer token"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildMCPServers returned error: %v", err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("server count = %d, want 2", len(servers))
+	}
+	if servers[0].Stdio == nil || servers[0].Stdio.Name != "playwright" || servers[0].Stdio.Command != "npx" {
+		t.Fatalf("stdio server = %#v, want playwright stdio config", servers[0])
+	}
+	if len(servers[0].Stdio.Env) != 1 || servers[0].Stdio.Env[0].Name != "DEBUG" || servers[0].Stdio.Env[0].Value != "1" {
+		t.Fatalf("stdio env = %#v, want DEBUG=1", servers[0].Stdio.Env)
+	}
+	if servers[1].Http == nil || servers[1].Http.Type != "http" || servers[1].Http.Url != "https://mcp.example.test/http" {
+		t.Fatalf("http server = %#v, want mapped http config", servers[1])
+	}
+	if len(servers[1].Http.Headers) != 1 || servers[1].Http.Headers[0].Name != "Authorization" {
+		t.Fatalf("http headers = %#v, want Authorization header", servers[1].Http.Headers)
+	}
+}
+
+func TestCreateTerminalBlocksWhenACPToolIsDisabled(t *testing.T) {
+	client := &localClient{
+		workplace: t.TempDir(),
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{CreateTerminal: false},
+		},
+	}
+
+	_, err := client.CreateTerminal(context.Background(), acpsdk.CreateTerminalRequest{Command: "git", Args: []string{"status"}})
+	if err == nil {
+		t.Fatal("CreateTerminal returned nil error, want acp tool denial")
+	}
+	if !strings.Contains(err.Error(), "createTerminal") {
+		t.Fatalf("CreateTerminal error = %v, want createTerminal denial", err)
+	}
+}
+
+func TestTerminalOutputBlocksWhenACPToolIsDisabled(t *testing.T) {
+	client := &localClient{
+		workplace: t.TempDir(),
+		terminals: map[string]*terminalState{"123": {}},
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{TerminalOutput: false},
+		},
+	}
+
+	_, err := client.TerminalOutput(context.Background(), acpsdk.TerminalOutputRequest{TerminalId: "123"})
+	if err == nil {
+		t.Fatal("TerminalOutput returned nil error, want acp tool denial")
+	}
+	if !strings.Contains(err.Error(), "terminalOutput") {
+		t.Fatalf("TerminalOutput error = %v, want terminalOutput denial", err)
+	}
+}
+
+func TestReadTextFileBlocksGitMetadataWhenGitVisibilityRestricted(t *testing.T) {
+	workplace := t.TempDir()
+	gitPath := filepath.Join(workplace, ".git")
+	if err := os.MkdirAll(gitPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(gitPath, "HEAD"), []byte("ref: refs/heads/main"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	client := &localClient{
+		workplace: workplace,
+		permissions: discovery.PermissionsConfig{
+			Git: discovery.GitPermissions{Status: false, Diff: false, History: false},
+			ACP: discovery.ACPPermissions{ReadTextFile: true},
+		},
+	}
+
+	_, err := client.ReadTextFile(context.Background(), acpsdk.ReadTextFileRequest{Path: filepath.Join(".git", "HEAD")})
+	if err == nil {
+		t.Fatal("ReadTextFile returned nil error, want git metadata denial")
+	}
+	if !strings.Contains(err.Error(), "git metadata is hidden") {
+		t.Fatalf("ReadTextFile error = %v, want git metadata denial", err)
+	}
+}
+
+func TestCreateTerminalBlocksRestrictedGitCommands(t *testing.T) {
+	client := &localClient{
+		workplace: t.TempDir(),
+		permissions: discovery.PermissionsConfig{
+			Git: discovery.GitPermissions{Status: true, Diff: false, History: false},
+			ACP: discovery.ACPPermissions{CreateTerminal: true},
+		},
+	}
+
+	_, err := client.CreateTerminal(context.Background(), acpsdk.CreateTerminalRequest{Command: "git", Args: []string{"log", "--oneline"}})
+	if err == nil {
+		t.Fatal("CreateTerminal returned nil error for git log, want access denied")
+	}
+	if !strings.Contains(err.Error(), "git history access is disabled") {
+		t.Fatalf("git log error = %v, want history denial", err)
+	}
+
+	_, err = client.CreateTerminal(context.Background(), acpsdk.CreateTerminalRequest{Command: "git", Args: []string{"diff"}})
+	if err == nil {
+		t.Fatal("CreateTerminal returned nil error for git diff, want access denied")
+	}
+	if !strings.Contains(err.Error(), "git diff access is disabled") {
+		t.Fatalf("git diff error = %v, want diff denial", err)
+	}
+
+	err = client.checkTerminalPermissions("git", []string{"status"})
+	if err != nil {
+		t.Fatalf("checkTerminalPermissions returned error for allowed git status: %v", err)
+	}
+}
+
+func TestCreateTerminalBlocksGitInsideShellScript(t *testing.T) {
+	client := &localClient{
+		workplace: t.TempDir(),
+		permissions: discovery.PermissionsConfig{
+			Git: discovery.GitPermissions{Status: false, Diff: false, History: false},
+			ACP: discovery.ACPPermissions{CreateTerminal: true},
+		},
+		terminals: make(map[string]*terminalState),
+	}
+
+	_, err := client.CreateTerminal(context.Background(), acpsdk.CreateTerminalRequest{
+		Command: "pwsh",
+		Args:    []string{"-NoProfile", "-Command", "git status"},
+	})
+	if err == nil {
+		t.Fatal("CreateTerminal returned nil error for shell git invocation, want access denied")
+	}
+	if !strings.Contains(err.Error(), "git status access is disabled") {
+		t.Fatalf("shell git error = %v, want status denial", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	repository "MattiasHognas/Kennel/internal/data"
+	"MattiasHognas/Kennel/internal/discovery"
 	eventbus "MattiasHognas/Kennel/internal/events"
 	"MattiasHognas/Kennel/internal/supervisor"
 )
@@ -50,7 +51,7 @@ func TestRunPlanAddsMissingAgentsAndPersistsPlannerResult(t *testing.T) {
 	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
 	var topics []string
-	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
 		topics = append(topics, topic)
 
 		switch topic {
@@ -102,7 +103,7 @@ func TestRunPlanResolvesAgentNameVariants(t *testing.T) {
 	tracking := &trackingRepo{SQLiteRepository: repo}
 	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
-	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
 		switch topic {
 		case "planner":
 			return &stubACPClient{response: `{"streams":[[{"agent":"Frontend Developer","task":"Build UI"}]]}`}, nil
@@ -136,7 +137,7 @@ func TestRunPlanAcceptsGeneralPurposeFallback(t *testing.T) {
 	tracking := &trackingRepo{SQLiteRepository: repo}
 	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
-	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
 		switch topic {
 		case "planner":
 			return &stubACPClient{response: `{"streams":[[{"agent":"general_purpose","task":"Handle the implementation directly"}]]}`}, nil
@@ -171,7 +172,7 @@ func TestRunPlanRejectsUnknownAgentBeforeExecution(t *testing.T) {
 	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
 	var topics []string
-	super.AcpFactory = func(ctx context.Context, binary string, args []string, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
 		topics = append(topics, topic)
 		return &stubACPClient{response: `{"streams":[[{"agent":"unknown-agent","task":"Do work"}]]}`}, nil
 	}
@@ -199,6 +200,52 @@ func TestRunPlanRejectsUnknownAgentBeforeExecution(t *testing.T) {
 	}
 	if len(tracking.checkpoints) == 0 || tracking.checkpoints[len(tracking.checkpoints)-1] != "planning_validation_failed" {
 		t.Fatalf("checkpoint statuses = %v, want planning_validation_failed", tracking.checkpoints)
+	}
+}
+
+func TestRunPlanOmitsPreviousOutputWhenAgentDisablesPromptContext(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "tester")
+	eb := eventbus.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := supervisor.NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	var testerMessages []string
+	super.AcpFactory = func(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (supervisor.ACPClient, error) {
+		switch topic {
+		case "planner":
+			return &stubACPClient{response: `{"streams":[[{"agent":"tester","task":"Run focused tests"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready"}, nil
+		case "tester":
+			if definition.PromptContext.PreviousOutput {
+				t.Fatalf("tester prompt context should be disabled by agent config")
+			}
+			return &stubACPClient{response: "tests done", messages: &testerMessages}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	testerDir := filepath.Join(agentsRoot, "agents", "tester")
+	if err := os.WriteFile(filepath.Join(testerDir, "agent.json"), []byte(`{
+		"promptContext": {"previousOutput": false},
+		"permissions": {"git": {"status": false, "diff": false, "history": false}}
+	}`), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"tester"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	if len(testerMessages) != 1 {
+		t.Fatalf("tester messages = %v, want exactly one prompt", testerMessages)
+	}
+	if testerMessages[0] != "Task: Run focused tests" {
+		t.Fatalf("tester prompt = %q, want task-only prompt", testerMessages[0])
 	}
 }
 
@@ -235,7 +282,7 @@ func newTestAgentsRoot(t *testing.T, agentNames ...string) string {
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(agentsDir, "cli.json"), []byte(`{"binary":"copilot","args":["--acp"]}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(agentsDir, "default.json"), []byte(`{"binary":"copilot","args":["--acp"]}`), 0644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
