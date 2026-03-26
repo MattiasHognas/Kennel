@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -15,8 +16,15 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
+const appLoggerName = "app"
+
 func main() {
-	m, cleanup := initialModel()
+	appLogger := data.NewProjectLogger(".", 0, appLoggerName)
+	m, cleanup, err := initialModel()
+	if err != nil {
+		reportAppError(appLogger, "Failed to initialize application: %v", err)
+		return
+	}
 
 	p := tea.NewProgram(m)
 	finalModel, err := p.Run()
@@ -28,17 +36,29 @@ func main() {
 	cleanup()
 
 	if err != nil {
-		panic(fmt.Sprintf("Something broke: %v", err))
+		reportAppError(appLogger, "Something broke: %v", err)
 	}
 }
 
-func initialModel() (logic.Model, func()) {
+func reportAppError(logger *data.ProjectLogger, format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	if logger != nil {
+		logger.LogProjectError(message)
+	}
+	log.Printf("%s", message)
+}
+
+func initialModel() (logic.Model, func(), error) {
 	focusedStyles, blurredStyles := ui.NewTableStyles()
 	repository, err := data.NewSQLiteRepository("data/kennel.db")
 	if err != nil {
-		panic(fmt.Sprintf("Failed to initialize repository: %v", err))
+		return logic.Model{}, func() {}, fmt.Errorf("initialize repository: %w", err)
 	}
-	sampleProjects := loadProjects(repository)
+	sampleProjects, err := loadProjects(repository)
+	if err != nil {
+		_ = repository.Close()
+		return logic.Model{}, func() {}, fmt.Errorf("load projects: %w", err)
+	}
 	m := logic.NewModel(focusedStyles, blurredStyles, sampleProjects, repository)
 
 	m.ResizeTables(logic.DefaultProjectWidth+logic.DefaultAgentWidth+logic.DefaultActivityWidth, logic.DefaultTableHeight+logic.FooterHeight+4)
@@ -48,12 +68,16 @@ func initialModel() (logic.Model, func()) {
 		_ = repository.Close()
 	}
 
-	return m, cleanup
+	return m, cleanup, nil
 }
 
-func sampleProjects() []logic.Project {
+func sampleProjects() ([]logic.Project, error) {
+	workplace, err := sampleProjectWorkplace()
+	if err != nil {
+		return nil, err
+	}
 
-	var seedConfig = logic.ProjectConfig{Name: "Sample project", Workplace: sampleProjectWorkplace(), Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes and a frontend where you can cycle trough the jokes"}
+	var seedConfig = logic.ProjectConfig{Name: "Sample project", Workplace: workplace, Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes and a frontend where you can cycle trough the jokes"}
 
 	projects := make([]logic.Project, 0)
 	agents := make([]workers.AgentContract, 0)
@@ -74,39 +98,36 @@ func sampleProjects() []logic.Project {
 		},
 	})
 
-	return projects
+	return projects, nil
 }
 
-func sampleProjectWorkplace() string {
+func sampleProjectWorkplace() (string, error) {
 	absWorkplace, err := filepath.Abs("../test_project")
 	if err != nil {
-		panic(fmt.Sprintf("Failed to resolve sample project workplace directory: %v", err))
+		return "", fmt.Errorf("resolve sample project workplace directory: %w", err)
 	}
 
-	return absWorkplace
+	return absWorkplace, nil
 }
 
-func loadProjects(repository *data.SQLiteRepository) []logic.Project {
+func loadProjects(repository *data.SQLiteRepository) ([]logic.Project, error) {
 
 	storedProjects, err := repository.ReadProjects(context.Background())
 	if err != nil {
-		_ = repository.Close()
-		panic(fmt.Sprintf("Failed to read projects, falling back to samples: %v\n", err))
+		return nil, fmt.Errorf("read projects: %w", err)
 	}
 
 	if len(storedProjects) == 0 {
 		if err := seedSampleProjects(repository); err != nil {
-			_ = repository.Close()
-			panic(fmt.Sprintf("Failed to seed sample projects, falling back to samples: %v\n", err))
+			return nil, fmt.Errorf("seed sample projects: %w", err)
 		}
 
 		storedProjects, err = repository.ReadProjects(context.Background())
 		if err != nil || len(storedProjects) == 0 {
-			_ = repository.Close()
 			if err != nil {
-				panic(fmt.Sprintf("Failed to read seeded projects, falling back to samples: %v\n", err))
+				return nil, fmt.Errorf("read seeded projects: %w", err)
 			} else {
-				panic("Failed to read seeded projects (empty), falling back to samples\n")
+				return nil, fmt.Errorf("read seeded projects: empty result")
 			}
 		}
 	}
@@ -147,11 +168,16 @@ func loadProjects(repository *data.SQLiteRepository) []logic.Project {
 		})
 	}
 
-	return projects
+	return projects, nil
 }
 
 func seedSampleProjects(repository *data.SQLiteRepository) error {
-	for _, definition := range sampleProjects() {
+	definitions, err := sampleProjects()
+	if err != nil {
+		return err
+	}
+
+	for _, definition := range definitions {
 		workplace := definition.Config.Workplace
 		if workplace != "" {
 			absWP, err := filepath.Abs(workplace)
