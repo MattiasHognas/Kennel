@@ -54,6 +54,14 @@ func (l *ProjectLogger) LogAgentOutput(agentName, output string) {
 	l.LogAgentEvent(agentName, "OUTPUT", output)
 }
 
+func (l *ProjectLogger) LogAgentError(agentName, message string) {
+	l.LogAgentEvent(agentName, "ERROR", message)
+}
+
+func (l *ProjectLogger) LogProjectError(message string) {
+	l.LogProject("PROJECT_ERROR", message)
+}
+
 func (l *ProjectLogger) LogAgentEvent(agentName, eventType, message string) {
 	if l == nil {
 		return

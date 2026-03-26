@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,6 +45,22 @@ type Wrapper struct {
 	logger  *logging.ProjectLogger
 }
 
+func logAndWrapAgentError(logger *logging.ProjectLogger, agentName, prefix string, err error) error {
+	wrapped := fmt.Errorf("%s: %w", prefix, err)
+	if logger != nil {
+		logger.LogAgentError(agentName, wrapped.Error())
+	}
+	return wrapped
+}
+
+func logAndReturnAgentError(logger *logging.ProjectLogger, agentName, message string) error {
+	err := errors.New(message)
+	if logger != nil {
+		logger.LogAgentError(agentName, err.Error())
+	}
+	return err
+}
+
 func NewWrapper(ctx context.Context, definition discovery.AgentDefinition, eb *eventbus.EventBus, workplace string, topic string) (*Wrapper, error) {
 	cmd := exec.CommandContext(ctx, definition.LaunchConfig.Binary, definition.LaunchConfig.Args...)
 	cmd.Dir = workplace
@@ -51,18 +68,18 @@ func NewWrapper(ctx context.Context, definition discovery.AgentDefinition, eb *e
 
 	inw, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("stdin: %w", err)
+		return nil, logAndWrapAgentError(nil, topic, "stdin", err)
 	}
 
 	outr, err := cmd.StdoutPipe()
 	if err != nil {
 		inw.Close()
-		return nil, fmt.Errorf("stdout: %w", err)
+		return nil, logAndWrapAgentError(nil, topic, "stdout", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		inw.Close()
-		return nil, fmt.Errorf("start: %w", err)
+		return nil, logAndWrapAgentError(nil, topic, "start", err)
 	}
 
 	handler := &localClient{
@@ -81,17 +98,17 @@ func NewWrapper(ctx context.Context, definition discovery.AgentDefinition, eb *e
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("init: %w", err)
+		return nil, logAndWrapAgentError(nil, topic, "init", err)
 	}
 
 	mcpServers, err := buildMCPServers(definition.MCPServers)
 	if err != nil {
-		return nil, fmt.Errorf("build mcp servers: %w", err)
+		return nil, logAndWrapAgentError(nil, topic, "build mcp servers", err)
 	}
 
 	sessionRes, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: workplace, McpServers: mcpServers})
 	if err != nil {
-		return nil, fmt.Errorf("session: %w", err)
+		return nil, logAndWrapAgentError(nil, topic, "session", err)
 	}
 
 	return &Wrapper{
@@ -142,7 +159,7 @@ func (w *Wrapper) Prompt(ctx context.Context, msg string) (string, error) {
 
 	err := <-errChan
 	if err != nil {
-		return "", err
+		return "", logAndWrapAgentError(w.logger, w.topic, "prompt", err)
 	}
 
 	result := sb.String()
@@ -223,7 +240,7 @@ func buildMCPServers(configs []discovery.MCPServer) ([]acp.McpServer, error) {
 				},
 			})
 		default:
-			return nil, fmt.Errorf("unsupported mcp transport %q", config.Transport)
+			return nil, logAndReturnAgentError(nil, "mcp", fmt.Sprintf("unsupported mcp transport %q", config.Transport))
 		}
 	}
 
@@ -339,6 +356,14 @@ type localClient struct {
 	terminals   map[string]*terminalState
 }
 
+func (c *localClient) failWrap(prefix string, err error) error {
+	return logAndWrapAgentError(c.logger, c.topic, prefix, err)
+}
+
+func (c *localClient) fail(message string) error {
+	return logAndReturnAgentError(c.logger, c.topic, message)
+}
+
 func (w *Wrapper) SetLogger(logger *logging.ProjectLogger) {
 	w.logger = logger
 	if w.handler != nil {
@@ -427,7 +452,7 @@ func (c *localClient) checkInWorkplace(targetPath string) (string, error) {
 		return "", err
 	}
 	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path is outside of workspace")
+		return "", c.fail("path is outside of workspace")
 	}
 
 	return resolvedTarget, nil
@@ -436,21 +461,21 @@ func (c *localClient) checkInWorkplace(targetPath string) (string, error) {
 func (c *localClient) ReadTextFile(ctx context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.ReadTextFileResponse{}, fmt.Errorf("validation failed: %w", err)
+		return acp.ReadTextFileResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolReadTextFile); err != nil {
-		return acp.ReadTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.ReadTextFileResponse{}, c.failWrap("access denied", err)
 	}
 	resolvedPath, err := c.checkInWorkplace(params.Path)
 	if err != nil {
-		return acp.ReadTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.ReadTextFileResponse{}, c.failWrap("access denied", err)
 	}
 	if err := c.checkPathPermissions(resolvedPath); err != nil {
-		return acp.ReadTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.ReadTextFileResponse{}, c.failWrap("access denied", err)
 	}
 	content, err := os.ReadFile(resolvedPath)
 	if err != nil {
-		return acp.ReadTextFileResponse{}, fmt.Errorf("failed to read file: %w", err)
+		return acp.ReadTextFileResponse{}, c.failWrap("failed to read file", err)
 	}
 	return acp.ReadTextFileResponse{Content: string(content)}, nil
 }
@@ -458,21 +483,21 @@ func (c *localClient) ReadTextFile(ctx context.Context, params acp.ReadTextFileR
 func (c *localClient) WriteTextFile(ctx context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.WriteTextFileResponse{}, fmt.Errorf("validation failed: %w", err)
+		return acp.WriteTextFileResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolWriteTextFile); err != nil {
-		return acp.WriteTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.WriteTextFileResponse{}, c.failWrap("access denied", err)
 	}
 	resolvedPath, err := c.checkInWorkplace(params.Path)
 	if err != nil {
-		return acp.WriteTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.WriteTextFileResponse{}, c.failWrap("access denied", err)
 	}
 	if err := c.checkPathPermissions(resolvedPath); err != nil {
-		return acp.WriteTextFileResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.WriteTextFileResponse{}, c.failWrap("access denied", err)
 	}
 	err = os.WriteFile(resolvedPath, []byte(params.Content), 0644)
 	if err != nil {
-		return acp.WriteTextFileResponse{}, fmt.Errorf("failed to write file: %w", err)
+		return acp.WriteTextFileResponse{}, c.failWrap("failed to write file", err)
 	}
 	return acp.WriteTextFileResponse{}, nil
 }
@@ -480,10 +505,10 @@ func (c *localClient) WriteTextFile(ctx context.Context, params acp.WriteTextFil
 func (c *localClient) RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.RequestPermissionResponse{}, fmt.Errorf("validation failed: %w", err)
+		return acp.RequestPermissionResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolRequestPermission); err != nil {
-		return acp.RequestPermissionResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.RequestPermissionResponse{}, c.failWrap("access denied", err)
 	}
 	var permissionOption *acp.PermissionOption
 	for _, option := range params.Options {
@@ -501,13 +526,13 @@ func (c *localClient) RequestPermission(ctx context.Context, params acp.RequestP
 func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.CreateTerminalResponse{}, fmt.Errorf("validation failed: %w", err)
+		return acp.CreateTerminalResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolCreateTerminal); err != nil {
-		return acp.CreateTerminalResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.CreateTerminalResponse{}, c.failWrap("access denied", err)
 	}
 	if err := c.checkTerminalPermissions(params.Command, params.Args); err != nil {
-		return acp.CreateTerminalResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.CreateTerminalResponse{}, c.failWrap("access denied", err)
 	}
 	terminalCmd := exec.Command(params.Command, params.Args...)
 	terminalCmd.Dir = c.workplace
@@ -516,7 +541,7 @@ func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTermi
 	terminalCmd.Stderr = state
 	err = terminalCmd.Start()
 	if err != nil {
-		return acp.CreateTerminalResponse{}, fmt.Errorf("failed to start terminal command: %w", err)
+		return acp.CreateTerminalResponse{}, c.failWrap("failed to start terminal command", err)
 	}
 	if c.logger != nil {
 		commandLine := strings.TrimSpace(strings.Join(append([]string{params.Command}, params.Args...), " "))
@@ -535,16 +560,16 @@ func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTermi
 func (c *localClient) KillTerminalCommand(ctx context.Context, params acp.KillTerminalCommandRequest) (acp.KillTerminalCommandResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.KillTerminalCommandResponse{}, fmt.Errorf("validation failed: %w", err)
+		return acp.KillTerminalCommandResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolKillTerminal); err != nil {
-		return acp.KillTerminalCommandResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.KillTerminalCommandResponse{}, c.failWrap("access denied", err)
 	}
 	c.terminalsMu.Lock()
 	state, exists := c.terminals[params.TerminalId]
 	c.terminalsMu.Unlock()
 	if !exists {
-		return acp.KillTerminalCommandResponse{}, fmt.Errorf("invalid terminal ID")
+		return acp.KillTerminalCommandResponse{}, c.fail("invalid terminal ID")
 	}
 	if state.cmd.Process != nil {
 		_ = state.cmd.Process.Kill()
@@ -558,16 +583,16 @@ func (c *localClient) KillTerminalCommand(ctx context.Context, params acp.KillTe
 func (c *localClient) TerminalOutput(ctx context.Context, params acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.TerminalOutputResponse{}, fmt.Errorf("validation failed: %w", err)
+		return acp.TerminalOutputResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolTerminalOutput); err != nil {
-		return acp.TerminalOutputResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.TerminalOutputResponse{}, c.failWrap("access denied", err)
 	}
 	c.terminalsMu.Lock()
 	state, exists := c.terminals[params.TerminalId]
 	c.terminalsMu.Unlock()
 	if !exists {
-		return acp.TerminalOutputResponse{}, fmt.Errorf("invalid terminal ID")
+		return acp.TerminalOutputResponse{}, c.fail("invalid terminal ID")
 	}
 	out := state.ReadAndClear()
 	return acp.TerminalOutputResponse{Output: out}, nil
@@ -576,10 +601,10 @@ func (c *localClient) TerminalOutput(ctx context.Context, params acp.TerminalOut
 func (c *localClient) ReleaseTerminal(ctx context.Context, params acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.ReleaseTerminalResponse{}, fmt.Errorf("validation failed: %w", err)
+		return acp.ReleaseTerminalResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolReleaseTerminal); err != nil {
-		return acp.ReleaseTerminalResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.ReleaseTerminalResponse{}, c.failWrap("access denied", err)
 	}
 	c.terminalsMu.Lock()
 	_, exists := c.terminals[params.TerminalId]
@@ -588,7 +613,7 @@ func (c *localClient) ReleaseTerminal(ctx context.Context, params acp.ReleaseTer
 	}
 	c.terminalsMu.Unlock()
 	if !exists {
-		return acp.ReleaseTerminalResponse{}, fmt.Errorf("invalid terminal ID")
+		return acp.ReleaseTerminalResponse{}, c.fail("invalid terminal ID")
 	}
 	return acp.ReleaseTerminalResponse{}, nil
 }
@@ -596,28 +621,28 @@ func (c *localClient) ReleaseTerminal(ctx context.Context, params acp.ReleaseTer
 func (c *localClient) WaitForTerminalExit(ctx context.Context, params acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.WaitForTerminalExitResponse{}, fmt.Errorf("validation failed: %w", err)
+		return acp.WaitForTerminalExitResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolWaitForTerminal); err != nil {
-		return acp.WaitForTerminalExitResponse{}, fmt.Errorf("access denied: %w", err)
+		return acp.WaitForTerminalExitResponse{}, c.failWrap("access denied", err)
 	}
 	c.terminalsMu.Lock()
 	state, exists := c.terminals[params.TerminalId]
 	c.terminalsMu.Unlock()
 	if !exists {
-		return acp.WaitForTerminalExitResponse{}, fmt.Errorf("invalid terminal ID")
+		return acp.WaitForTerminalExitResponse{}, c.fail("invalid terminal ID")
 	}
 
 	select {
 	case <-ctx.Done():
-		return acp.WaitForTerminalExitResponse{}, ctx.Err()
+		return acp.WaitForTerminalExitResponse{}, c.failWrap("wait for terminal exit", ctx.Err())
 	case <-state.done:
 		exitCode, waitErr := state.exitResult()
 		if exitCode != nil {
 			return acp.WaitForTerminalExitResponse{ExitCode: exitCode}, nil
 		}
 		if waitErr != nil {
-			return acp.WaitForTerminalExitResponse{}, waitErr
+			return acp.WaitForTerminalExitResponse{}, c.failWrap("wait for terminal exit", waitErr)
 		}
 	}
 	return acp.WaitForTerminalExitResponse{}, nil

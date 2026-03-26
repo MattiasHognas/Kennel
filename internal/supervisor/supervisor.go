@@ -242,7 +242,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 	}
 
 	if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, 1, "completed", setupOut); saveErr != nil {
-		return saveErr
+		return s.failStop(ctx, 1, "checkpoint_failed", fmt.Errorf("checkpoint after branch setup: %w", saveErr))
 	}
 
 	g, gCtx := errgroup.WithContext(ctx)
@@ -319,7 +319,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 				}
 
 				if saveErr := s.Repo.CheckpointSupervisorRun(gCtx, s.ProjectID, 2+streamIdx*100+stepIdx, "completed", out); saveErr != nil {
-					return saveErr
+					return fmt.Errorf("checkpoint after stream %d step %d: %w", streamIdx, stepIdx, saveErr)
 				}
 			}
 			return nil
@@ -609,7 +609,7 @@ func (s *Supervisor) failStop(ctx context.Context, stepIndex int, status string,
 		s.Logger.LogProject("PROJECT_STATE", "stopped")
 	}
 	if s.Logger != nil {
-		s.Logger.LogProject("PROJECT_ERROR", fmt.Sprintf("step=%d\nstatus=%s\nerror=%v", stepIndex, status, originalErr))
+		s.Logger.LogProjectError(fmt.Sprintf("step=%d\nstatus=%s\nerror=%v", stepIndex, status, originalErr))
 	}
 	if s.Repo != nil {
 		_ = s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, stepIndex, status, originalErr.Error())

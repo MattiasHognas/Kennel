@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"MattiasHognas/Kennel/internal/discovery"
+	"MattiasHognas/Kennel/internal/logging"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 )
@@ -135,6 +136,49 @@ func TestRequestPermissionBlocksWhenACPToolIsDisabled(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "requestPermission") {
 		t.Fatalf("RequestPermission error = %v, want requestPermission denial", err)
+	}
+}
+
+func TestACPToolErrorsAreLoggedBeforeReturn(t *testing.T) {
+	rootDir := t.TempDir()
+	client := &localClient{
+		topic:  "tester",
+		logger: logging.NewProjectLogger(rootDir, 5, "ACP Errors"),
+		permissions: discovery.PermissionsConfig{
+			ACP: discovery.ACPPermissions{RequestPermission: false},
+		},
+	}
+
+	_, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
+		SessionId: "session",
+		ToolCall:  acpsdk.RequestPermissionToolCall{ToolCallId: "tool-call"},
+		Options: []acpsdk.PermissionOption{{
+			OptionId: "allow",
+			Name:     "Allow once",
+			Kind:     acpsdk.PermissionOptionKindAllowOnce,
+		}},
+	})
+	if err == nil {
+		t.Fatal("RequestPermission returned nil error, want logged acp tool denial")
+	}
+
+	entries, readErr := os.ReadDir(filepath.Join(rootDir, "logs"))
+	if readErr != nil {
+		t.Fatalf("ReadDir returned error: %v", readErr)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("log entry count = %d, want 1", len(entries))
+	}
+
+	content, readErr := os.ReadFile(filepath.Join(rootDir, "logs", entries[0].Name()))
+	if readErr != nil {
+		t.Fatalf("ReadFile returned error: %v", readErr)
+	}
+	text := string(content)
+	for _, fragment := range []string{"ERROR", "agent=tester", "access denied", "requestPermission"} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("project log missing %q:\n%s", fragment, text)
+		}
 	}
 }
 
