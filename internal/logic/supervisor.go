@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -54,8 +57,30 @@ type ACPClient interface {
 
 type ACPFactory func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error)
 
+type GitRootResolver func(ctx context.Context, workplace string) (string, error)
+
 func DefaultACPFactory(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
 	return workers.NewWrapper(ctx, definition, eb, workplace, topic)
+}
+
+func DefaultGitRootResolver(ctx context.Context, workplace string) (string, error) {
+	resolvedWorkplace, err := filepath.Abs(strings.TrimSpace(workplace))
+	if err != nil {
+		return "", fmt.Errorf("resolve workplace path: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", resolvedWorkplace, "rev-parse", "--show-toplevel")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", nil
+	}
+
+	gitRoot := strings.TrimSpace(string(out))
+	if gitRoot == "" {
+		return "", fmt.Errorf("git returned an empty repository root for %s", resolvedWorkplace)
+	}
+
+	return filepath.Clean(gitRoot), nil
 }
 
 type Supervisor struct {
@@ -66,6 +91,7 @@ type Supervisor struct {
 	ProjectName string
 	Workplace   string
 	AcpFactory  ACPFactory
+	GitRoot     GitRootResolver
 	Logger      *data.ProjectLogger
 }
 
@@ -78,6 +104,7 @@ func NewSupervisor(repo Repository, eb *data.EventBus, agentsDir string, project
 		ProjectName: projectName,
 		Workplace:   workplace,
 		AcpFactory:  DefaultACPFactory,
+		GitRoot:     DefaultGitRootResolver,
 		Logger:      data.NewProjectLogger(agentsDir, projectID, projectName),
 	}
 }
@@ -203,6 +230,9 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 	}
 
 	if branchSetupRec.State != "completed" {
+		if err := s.validateWorkplaceGitRoot(ctx); err != nil {
+			return s.failAgentAndStop(ctx, branchSetupRec, 1, "workplace_validation_failed", err)
+		}
 		if err := s.markAgentRunning(ctx, branchSetupRec, branchSetupTask.Task); err != nil {
 			return s.failAgentAndStop(ctx, branchSetupRec, 1, "execution_failed", err)
 		}
@@ -487,6 +517,40 @@ func buildTaskPrompt(task string, previousOutput string, includePreviousOutput b
 	}
 
 	return fmt.Sprintf("Task: %s\n\nPrevious context/output: %s", task, previousOutput)
+}
+
+func (s *Supervisor) validateWorkplaceGitRoot(ctx context.Context) error {
+	if s.GitRoot == nil {
+		return nil
+	}
+
+	resolvedWorkplace, err := filepath.Abs(strings.TrimSpace(s.Workplace))
+	if err != nil {
+		return fmt.Errorf("resolve workplace path: %w", err)
+	}
+
+	gitRoot, err := s.GitRoot(ctx, resolvedWorkplace)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(gitRoot) == "" {
+		return nil
+	}
+
+	if pathsMatch(resolvedWorkplace, gitRoot) {
+		return nil
+	}
+
+	return fmt.Errorf("workplace %s is inside git repository %s; configure the repository root as the workplace", resolvedWorkplace, gitRoot)
+}
+
+func pathsMatch(left string, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func (s *Supervisor) buildBranchSetupPrompt(task string, planJSON string, includePlan bool) string {

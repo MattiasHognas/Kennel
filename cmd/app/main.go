@@ -78,9 +78,9 @@ func sampleProjects() []logic.Project {
 }
 
 func sampleProjectWorkplace() string {
-	absWorkplace, err := filepath.Abs("test_project")
+	absWorkplace, err := filepath.Abs("../test_project")
 	if err != nil {
-		return "test_project"
+		panic(fmt.Sprintf("Failed to resolve sample project workplace directory: %v", err))
 	}
 
 	return absWorkplace

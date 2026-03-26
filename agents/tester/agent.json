@@ -1,6 +1,6 @@
 {
   "promptContext": {
-    "previousOutput": false
+    "previousOutput": true
   },
   "permissions": {
     "git": {

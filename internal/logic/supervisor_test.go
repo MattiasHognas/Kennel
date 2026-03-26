@@ -297,6 +297,54 @@ func TestRunPlanPassesConcreteBranchContextToBranchSetup(t *testing.T) {
 	}
 }
 
+func TestRunPlanStopsWhenWorkplaceIsNotGitRoot(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	var topics []string
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		topics = append(topics, topic)
+		switch topic {
+		case "planner":
+			return &stubACPClient{response: `{"streams":[[{"agent":"frontend-developer","task":"Build UI"}]]}`}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+	super.GitRoot = func(ctx context.Context, workplace string) (string, error) {
+		return filepath.Join(workplace, ".."), nil
+	}
+
+	err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"})
+	if err == nil {
+		t.Fatal("RunPlan returned nil error, want workplace validation failure")
+	}
+	if !strings.Contains(err.Error(), "configure the repository root as the workplace") {
+		t.Fatalf("RunPlan error = %v, want workplace validation failure", err)
+	}
+	if strings.Join(topics, ",") != "planner" {
+		t.Fatalf("ACP topics = %v, want only planner before branch-setup guard", topics)
+	}
+
+	stored, readErr := repo.ReadProject(context.Background(), project.ID)
+	if readErr != nil {
+		t.Fatalf("ReadProject returned error: %v", readErr)
+	}
+	if stored.State != "stopped" {
+		t.Fatalf("project state = %q, want stopped", stored.State)
+	}
+	assertAgentState(t, stored.Agents, "branch-setup", "failed", "")
+	assertActivityContains(t, stored.Activities, "branch-setup: failed: workplace "+project.Workplace+" is inside git repository "+filepath.Join(project.Workplace, "..")+"; configure the repository root as the workplace")
+	if len(tracking.checkpoints) == 0 || tracking.checkpoints[len(tracking.checkpoints)-1] != "workplace_validation_failed" {
+		t.Fatalf("checkpoint statuses = %v, want workplace_validation_failed", tracking.checkpoints)
+	}
+}
+
 func TestRunPlanMarksPlannerFailedAndStopsProjectOnLaunchFailure(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
