@@ -180,6 +180,31 @@ func TestACPToolErrorsAreLoggedBeforeReturn(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkplacePathReturnsAbsolutePath(t *testing.T) {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd returned error: %v", err)
+	}
+
+	relativeWorkplace, err := filepath.Rel(workingDir, filepath.Join(workingDir, "testdata", "sample-project"))
+	if err != nil {
+		t.Fatalf("Rel returned error: %v", err)
+	}
+
+	resolved, err := normalizeWorkplacePath(relativeWorkplace)
+	if err != nil {
+		t.Fatalf("normalizeWorkplacePath returned error: %v", err)
+	}
+
+	want := filepath.Join(workingDir, "testdata", "sample-project")
+	if resolved != want {
+		t.Fatalf("resolved workplace = %q, want %q", resolved, want)
+	}
+	if !filepath.IsAbs(resolved) {
+		t.Fatalf("resolved workplace = %q, want absolute path", resolved)
+	}
+}
+
 func TestWriteTextFileResolvesRelativePathsWithinWorkplace(t *testing.T) {
 	workplace := t.TempDir()
 	client := &localClient{
@@ -373,6 +398,65 @@ func TestBuildMCPServersReturnsEmptyArrayForMissingConfig(t *testing.T) {
 	}
 	if len(servers) != 0 {
 		t.Fatalf("server count = %d, want 0", len(servers))
+	}
+}
+
+func TestBuildMCPServersUsesEmptyArraysForOptionalMetadata(t *testing.T) {
+	servers, err := buildMCPServers([]data.MCPServer{
+		{
+			Transport: "stdio",
+			Name:      "context7",
+			Command:   "npx",
+		},
+		{
+			Transport: "http",
+			Name:      "remote",
+			URL:       "https://mcp.example.test/http",
+		},
+		{
+			Transport: "sse",
+			Name:      "events",
+			URL:       "https://mcp.example.test/sse",
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildMCPServers returned error: %v", err)
+	}
+	if len(servers) != 3 {
+		t.Fatalf("server count = %d, want 3", len(servers))
+	}
+	if servers[0].Stdio == nil {
+		t.Fatalf("stdio server = %#v, want stdio config", servers[0])
+	}
+	if servers[0].Stdio.Args == nil {
+		t.Fatal("stdio args = nil, want empty slice")
+	}
+	if servers[0].Stdio.Env == nil {
+		t.Fatal("stdio env = nil, want empty slice")
+	}
+	if len(servers[0].Stdio.Args) != 0 {
+		t.Fatalf("stdio args length = %d, want 0", len(servers[0].Stdio.Args))
+	}
+	if len(servers[0].Stdio.Env) != 0 {
+		t.Fatalf("stdio env length = %d, want 0", len(servers[0].Stdio.Env))
+	}
+	if servers[1].Http == nil {
+		t.Fatalf("http server = %#v, want http config", servers[1])
+	}
+	if servers[1].Http.Headers == nil {
+		t.Fatal("http headers = nil, want empty slice")
+	}
+	if len(servers[1].Http.Headers) != 0 {
+		t.Fatalf("http headers length = %d, want 0", len(servers[1].Http.Headers))
+	}
+	if servers[2].Sse == nil {
+		t.Fatalf("sse server = %#v, want sse config", servers[2])
+	}
+	if servers[2].Sse.Headers == nil {
+		t.Fatal("sse headers = nil, want empty slice")
+	}
+	if len(servers[2].Sse.Headers) != 0 {
+		t.Fatalf("sse headers length = %d, want 0", len(servers[2].Sse.Headers))
 	}
 }
 

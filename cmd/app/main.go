@@ -53,7 +53,7 @@ func initialModel() (logic.Model, func()) {
 
 func sampleProjects() []logic.Project {
 
-	var seedConfig = logic.ProjectConfig{Name: "Sample project", Workplace: "test_project", Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes and a frontend where you can cycle trough the jokes"}
+	var seedConfig = logic.ProjectConfig{Name: "Sample project", Workplace: sampleProjectWorkplace(), Instructions: "Build a simple dotnet 10 web api returning funny or bad jokes and a frontend where you can cycle trough the jokes"}
 
 	projects := make([]logic.Project, 0)
 	agents := make([]workers.AgentContract, 0)
@@ -75,6 +75,15 @@ func sampleProjects() []logic.Project {
 	})
 
 	return projects
+}
+
+func sampleProjectWorkplace() string {
+	absWorkplace, err := filepath.Abs("test_project")
+	if err != nil {
+		return "test_project"
+	}
+
+	return absWorkplace
 }
 
 func loadProjects(repository *data.SQLiteRepository) []logic.Project {
@@ -143,19 +152,19 @@ func loadProjects(repository *data.SQLiteRepository) []logic.Project {
 
 func seedSampleProjects(repository *data.SQLiteRepository) error {
 	for _, definition := range sampleProjects() {
-		if wp := definition.Config.Workplace; wp != "" {
-			absWP := wp
-			if !filepath.IsAbs(absWP) {
-				if wd, err := os.Getwd(); err == nil {
-					absWP = filepath.Join(wd, absWP)
-				}
+		workplace := definition.Config.Workplace
+		if workplace != "" {
+			absWP, err := filepath.Abs(workplace)
+			if err != nil {
+				return fmt.Errorf("resolve workplace directory %q: %w", workplace, err)
 			}
 			if err := os.MkdirAll(absWP, 0o755); err != nil {
 				return fmt.Errorf("create workplace directory %q: %w", absWP, err)
 			}
+			workplace = absWP
 		}
 
-		project, err := repository.CreateProject(context.Background(), definition.Config.Name, definition.Config.Workplace, definition.Config.Instructions)
+		project, err := repository.CreateProject(context.Background(), definition.Config.Name, workplace, definition.Config.Instructions)
 		if err != nil {
 			return err
 		}

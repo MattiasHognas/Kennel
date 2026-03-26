@@ -58,9 +58,18 @@ func logAndReturnAgentError(logger *data.ProjectLogger, agentName, message strin
 	return err
 }
 
+func normalizeWorkplacePath(workplace string) (string, error) {
+	return filepath.Abs(strings.TrimSpace(workplace))
+}
+
 func NewWrapper(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (*Wrapper, error) {
+	resolvedWorkplace, err := normalizeWorkplacePath(workplace)
+	if err != nil {
+		return nil, logAndWrapAgentError(nil, topic, "workplace", err)
+	}
+
 	cmd := exec.CommandContext(ctx, definition.LaunchConfig.Binary, definition.LaunchConfig.Args...)
-	cmd.Dir = workplace
+	cmd.Dir = resolvedWorkplace
 	cmd.Env = appendCommandEnv(definition.LaunchConfig.Env)
 
 	inw, err := cmd.StdinPipe()
@@ -82,7 +91,7 @@ func NewWrapper(ctx context.Context, definition data.AgentDefinition, eb *data.E
 	handler := &localClient{
 		eb:          eb,
 		topic:       topic,
-		workplace:   workplace,
+		workplace:   resolvedWorkplace,
 		permissions: definition.Permissions,
 		terminals:   make(map[string]*terminalState),
 	}
@@ -103,7 +112,7 @@ func NewWrapper(ctx context.Context, definition data.AgentDefinition, eb *data.E
 		return nil, logAndWrapAgentError(nil, topic, "build mcp servers", err)
 	}
 
-	sessionRes, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: workplace, McpServers: mcpServers})
+	sessionRes, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: resolvedWorkplace, McpServers: mcpServers})
 	if err != nil {
 		return nil, logAndWrapAgentError(nil, topic, "session", err)
 	}
@@ -214,7 +223,7 @@ func buildMCPServers(configs []data.MCPServer) ([]acp.McpServer, error) {
 				Stdio: &acp.McpServerStdio{
 					Name:    config.Name,
 					Command: config.Command,
-					Args:    append([]string(nil), config.Args...),
+					Args:    cloneStringSlice(config.Args),
 					Env:     mapEnvVariables(config.Env),
 				},
 			})
@@ -244,9 +253,17 @@ func buildMCPServers(configs []data.MCPServer) ([]acp.McpServer, error) {
 	return servers, nil
 }
 
+func cloneStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+
+	return append([]string{}, values...)
+}
+
 func mapEnvVariables(values map[string]string) []acp.EnvVariable {
 	if len(values) == 0 {
-		return nil
+		return []acp.EnvVariable{}
 	}
 
 	keys := sortedKeys(values)
@@ -260,7 +277,7 @@ func mapEnvVariables(values map[string]string) []acp.EnvVariable {
 
 func mapHTTPHeaders(values map[string]string) []acp.HttpHeader {
 	if len(values) == 0 {
-		return nil
+		return []acp.HttpHeader{}
 	}
 
 	keys := sortedKeys(values)
