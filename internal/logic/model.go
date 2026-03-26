@@ -38,6 +38,8 @@ type ProjectRuntime struct {
 	AgentIDs         []int64
 	Plan             *Plan
 	CollapsedStreams map[int]bool
+	AgentRunCancels  map[int]context.CancelFunc
+	AgentRunResults  map[int]chan agentRunResult
 	Logger           *data.ProjectLogger
 	Activities       []ActivityEntry
 	ActivityDone     <-chan struct{}
@@ -120,6 +122,7 @@ type Model struct {
 	windowHeight      int
 	keymap            Keymap
 	repository        *data.SQLiteRepository
+	agentExecutor     AgentExecutor
 	mode              viewMode
 	projectEditor     projectEditor
 }
@@ -143,6 +146,7 @@ func NewModel(focusedStyles, blurredStyles table.Styles, projects []Project, rep
 		blurredStyles: blurredStyles,
 		projects:      projects,
 		repository:    repository,
+		agentExecutor: defaultAgentExecutor,
 		projectEditor: newProjectEditor(),
 		keymap: Keymap{
 			quit: key.NewBinding(
@@ -282,6 +286,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applySupervisorPlan(msg.source, msg.plan)
 		return m, waitForSupervisorUpdate(msg.source)
+
+	case manualAgentCompletedMsg:
+		return m.handleAgentRunCompleted(msg)
 	}
 
 	if m.mode == projectEditorViewMode {
@@ -606,8 +613,7 @@ func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bo
 		return false, false, nil
 	case key.Matches(msg, m.keymap.startProject):
 		if m.focusIndex == 1 {
-			m.startSelectedAgent()
-			return false, true, nil
+			return false, true, m.startSelectedAgent()
 		} else {
 			return false, true, m.startSelectedProject()
 		}
@@ -620,8 +626,7 @@ func (m *Model) handleKeyPress(msg tea.KeyPressMsg) (shouldQuit bool, handled bo
 		return false, true, nil
 	case key.Matches(msg, m.keymap.toggleProject):
 		if m.focusIndex == 1 {
-			m.cycleSelectedAgentState()
-			return false, true, nil
+			return false, true, m.cycleSelectedAgentState()
 		} else {
 			return false, true, m.cycleSelectedProjectState()
 		}
@@ -680,6 +685,21 @@ func (m *Model) persistProjectAgentStates(project *Project) {
 		if err := m.repository.UpdateAgentState(context.Background(), agentID, project.Runtime.Agents[i].State().String()); err != nil {
 			m.reportAgentError(project, project.Runtime.Agents[i].Name(), "persist agent state", err)
 		}
+	}
+}
+
+func (m *Model) persistAgentOutput(project *Project, agentIndex int, output string) {
+	if project == nil || m.repository == nil || agentIndex < 0 || agentIndex >= len(project.Runtime.AgentIDs) {
+		return
+	}
+
+	agentID := project.Runtime.AgentIDs[agentIndex]
+	if agentID <= 0 {
+		return
+	}
+
+	if err := m.repository.UpdateAgentOutput(context.Background(), agentID, output); err != nil {
+		m.reportAgentError(project, project.Runtime.Agents[agentIndex].Name(), "persist agent output", err)
 	}
 }
 
@@ -856,6 +876,8 @@ func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 	preservedSupervisorDone := project.Runtime.SupervisorDone
 	preservedSupervisorResult := project.Runtime.SupervisorResult
 	preservedCancel := project.Runtime.CancelCtx
+	preservedAgentRunCancels := project.Runtime.AgentRunCancels
+	preservedAgentRunResults := project.Runtime.AgentRunResults
 	preservedLogger := project.Runtime.Logger
 
 	agents := make([]workers.AgentContract, 0, len(storedProject.Agents))
@@ -882,6 +904,8 @@ func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 		AgentIDs:         agentIDs,
 		Plan:             RestorePlanFromStoredAgents(storedProject.Agents),
 		CollapsedStreams: map[int]bool{},
+		AgentRunCancels:  preservedAgentRunCancels,
+		AgentRunResults:  preservedAgentRunResults,
 		Logger:           preservedLogger,
 		Activities:       activities,
 		Supervisor:       preservedSupervisor,

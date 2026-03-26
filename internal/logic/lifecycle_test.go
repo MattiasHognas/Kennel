@@ -7,6 +7,8 @@ import (
 	workers "MattiasHognas/Kennel/internal/workers"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -191,6 +193,209 @@ func TestFocusedAgentCyclesBetweenRunningAndStopped(t *testing.T) {
 	if persistedProject.Agents[0].State != workers.Stopped.String() {
 		t.Fatalf("stored agent state = %q, want %q", persistedProject.Agents[0].State, workers.Stopped.String())
 	}
+}
+
+func TestRestartSelectedPlannedAgentUsesPreviousStreamOutputAfterStop(t *testing.T) {
+	repo := newTestRepository(t)
+	projectRecord := newTestProject(t, repo)
+	storedAgents := []struct {
+		name   string
+		state  string
+		output string
+	}{
+		{name: "planner", state: workers.Completed.String(), output: `{"streams":[[{"agent":"frontend-developer","task":"Build UI"},{"agent":"tester","task":"Run focused tests"}]]}`},
+		{name: "branch-setup", state: workers.Completed.String(), output: "branch ready"},
+		{name: "frontend-developer", state: workers.Completed.String(), output: "frontend done"},
+		{name: "tester", state: workers.Stopped.String(), output: ""},
+	}
+
+	var agentIDs []int64
+	runtimeAgents := make([]workers.AgentContract, 0, len(storedAgents))
+	for _, stored := range storedAgents {
+		agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, stored.name)
+		if err != nil {
+			t.Fatalf("add agent %s: %v", stored.name, err)
+		}
+		if err := repo.UpdateAgentState(context.Background(), agentRecord.ID, stored.state); err != nil {
+			t.Fatalf("update agent state %s: %v", stored.name, err)
+		}
+		if err := repo.UpdateAgentOutput(context.Background(), agentRecord.ID, stored.output); err != nil {
+			t.Fatalf("update agent output %s: %v", stored.name, err)
+		}
+		runtimeAgent := workers.NewAgent(stored.name)
+		runtimeAgent.Hydrate(parseAgentState(stored.state))
+		runtimeAgents = append(runtimeAgents, runtimeAgent)
+		agentIDs = append(agentIDs, agentRecord.ID)
+	}
+
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer", "tester")
+	t.Setenv("KENNEL_ROOT_DIR", agentsRoot)
+
+	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
+		Config: ProjectConfig{
+			ProjectID:    projectRecord.ID,
+			Name:         projectRecord.Name,
+			Workplace:    projectRecord.Workplace,
+			Instructions: projectRecord.Instructions,
+		},
+		State: ProjectState{State: workers.Stopped},
+		Runtime: ProjectRuntime{
+			Agents:   runtimeAgents,
+			AgentIDs: agentIDs,
+			Plan:     RestorePlanFromStoredAgents(mustReadProject(t, repo, projectRecord.ID).Agents),
+		},
+	}}, repo)
+	m.SetFocus(1)
+	m.projectTable.SetCursor(1)
+	m.refreshSelectedProjectTables()
+	testerIndex := 3
+	m.agentTable.SetCursor(m.rowIndexForAgentIndex(testerIndex))
+
+	blocked := make(chan struct{})
+	released := make(chan struct{})
+	m.agentExecutor = func(ctx context.Context, definition data.AgentDefinition, workplace string, topic string, prompt string, logger *data.ProjectLogger) (string, error) {
+		close(blocked)
+		<-ctx.Done()
+		close(released)
+		return "", ctx.Err()
+	}
+
+	cmd := m.startSelectedAgent()
+	if cmd == nil {
+		t.Fatal("expected startSelectedAgent to return a completion command for planned agent execution")
+	}
+	<-blocked
+	if m.projects[0].Runtime.Agents[testerIndex].State() != workers.Running {
+		t.Fatalf("agent state after manual start = %s, want %s", m.projects[0].Runtime.Agents[testerIndex].State(), workers.Running)
+	}
+
+	m.stopSelectedAgent()
+	<-released
+	if m.projects[0].Runtime.Agents[testerIndex].State() != workers.Stopped {
+		t.Fatalf("agent state after manual stop = %s, want %s", m.projects[0].Runtime.Agents[testerIndex].State(), workers.Stopped)
+	}
+
+	msg := runCmdWithTimeout(t, cmd, 2*time.Second)
+	updatedModel, _ := m.Update(msg)
+	afterStop, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+	}
+	if afterStop.projects[0].Runtime.Agents[testerIndex].State() != workers.Stopped {
+		t.Fatalf("agent state after stale completion = %s, want %s", afterStop.projects[0].Runtime.Agents[testerIndex].State(), workers.Stopped)
+	}
+
+	var capturedPrompt string
+	afterStop.agentExecutor = func(ctx context.Context, definition data.AgentDefinition, workplace string, topic string, prompt string, logger *data.ProjectLogger) (string, error) {
+		capturedPrompt = prompt
+		return "tests done", nil
+	}
+
+	cmd = afterStop.startSelectedAgent()
+	msg = runCmdWithTimeout(t, cmd, 2*time.Second)
+	updatedModel, _ = afterStop.Update(msg)
+	finalModel, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+	}
+	wantPrompt := "Task: Run focused tests\n\nPrevious context/output: frontend done"
+	if capturedPrompt != wantPrompt {
+		t.Fatalf("restart prompt = %q, want %q", capturedPrompt, wantPrompt)
+	}
+	if finalModel.projects[0].Runtime.Agents[testerIndex].State() != workers.Completed {
+		t.Fatalf("agent state after restart completion = %s, want %s", finalModel.projects[0].Runtime.Agents[testerIndex].State(), workers.Completed)
+	}
+
+	persisted := mustReadProject(t, repo, projectRecord.ID)
+	assertAgentState(t, persisted.Agents, "tester", workers.Completed.String(), "tests done")
+}
+
+func TestSelectedPlannedAgentOmitsPreviousOutputWhenDisabled(t *testing.T) {
+	repo := newTestRepository(t)
+	projectRecord := newTestProject(t, repo)
+	storedAgents := []struct {
+		name   string
+		state  string
+		output string
+	}{
+		{name: "planner", state: workers.Completed.String(), output: `{"streams":[[{"agent":"tester","task":"Run focused tests"}]]}`},
+		{name: "branch-setup", state: workers.Completed.String(), output: "branch ready"},
+		{name: "tester", state: workers.Stopped.String(), output: ""},
+	}
+
+	var agentIDs []int64
+	runtimeAgents := make([]workers.AgentContract, 0, len(storedAgents))
+	for _, stored := range storedAgents {
+		agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, stored.name)
+		if err != nil {
+			t.Fatalf("add agent %s: %v", stored.name, err)
+		}
+		if err := repo.UpdateAgentState(context.Background(), agentRecord.ID, stored.state); err != nil {
+			t.Fatalf("update agent state %s: %v", stored.name, err)
+		}
+		if err := repo.UpdateAgentOutput(context.Background(), agentRecord.ID, stored.output); err != nil {
+			t.Fatalf("update agent output %s: %v", stored.name, err)
+		}
+		runtimeAgent := workers.NewAgent(stored.name)
+		runtimeAgent.Hydrate(parseAgentState(stored.state))
+		runtimeAgents = append(runtimeAgents, runtimeAgent)
+		agentIDs = append(agentIDs, agentRecord.ID)
+	}
+
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "tester")
+	t.Setenv("KENNEL_ROOT_DIR", agentsRoot)
+	testerDir := filepath.Join(agentsRoot, "agents", "tester")
+	if err := os.WriteFile(filepath.Join(testerDir, "agent.json"), []byte(`{
+		"promptContext": {"previousOutput": false}
+	}`), 0644); err != nil {
+		t.Fatalf("write tester agent config: %v", err)
+	}
+
+	m := NewModel(table.Styles{}, table.Styles{}, []Project{{
+		Config: ProjectConfig{
+			ProjectID:    projectRecord.ID,
+			Name:         projectRecord.Name,
+			Workplace:    projectRecord.Workplace,
+			Instructions: projectRecord.Instructions,
+		},
+		State: ProjectState{State: workers.Stopped},
+		Runtime: ProjectRuntime{
+			Agents:   runtimeAgents,
+			AgentIDs: agentIDs,
+			Plan:     RestorePlanFromStoredAgents(mustReadProject(t, repo, projectRecord.ID).Agents),
+		},
+	}}, repo)
+	m.SetFocus(1)
+	m.projectTable.SetCursor(1)
+	m.refreshSelectedProjectTables()
+	m.agentTable.SetCursor(m.rowIndexForAgentIndex(2))
+
+	var capturedPrompt string
+	m.agentExecutor = func(ctx context.Context, definition data.AgentDefinition, workplace string, topic string, prompt string, logger *data.ProjectLogger) (string, error) {
+		capturedPrompt = prompt
+		return "tests done", nil
+	}
+
+	cmd := m.startSelectedAgent()
+	msg := runCmdWithTimeout(t, cmd, 2*time.Second)
+	updatedModel, _ := m.Update(msg)
+	if _, ok := updatedModel.(Model); !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+	}
+	if capturedPrompt != "Task: Run focused tests" {
+		t.Fatalf("prompt = %q, want task-only prompt", capturedPrompt)
+	}
+}
+
+func mustReadProject(t *testing.T, repo *data.SQLiteRepository, projectID int64) data.Project {
+	t.Helper()
+
+	project, err := repo.ReadProject(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("read project: %v", err)
+	}
+
+	return project
 }
 
 func mustUpdateModel(t *testing.T, m Model, msg tea.Msg) (Model, bool) {

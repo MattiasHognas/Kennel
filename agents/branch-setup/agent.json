@@ -11,7 +11,7 @@
     "acp": {
       "readTextFile": true,
       "writeTextFile": false,
-      "requestPermission": false,
+      "requestPermission": true,
       "createTerminal": true,
       "killTerminal": true,
       "terminalOutput": true,

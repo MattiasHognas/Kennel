@@ -103,6 +103,7 @@ func (m *Model) failProjectAtIndex(projectIndex int) []ActivitySource {
 	}
 
 	project := &m.projects[projectIndex]
+	m.cancelProjectAgentRuns(project)
 	m.clearProjectSupervisor(project)
 
 	if m.repository != nil && project.Config.ProjectID > 0 {
@@ -125,6 +126,7 @@ func (m *Model) stopSelectedProject() {
 		project.Runtime.CancelCtx()
 		project.Runtime.CancelCtx = nil
 	}
+	m.cancelProjectAgentRuns(project)
 	project.Runtime.SupervisorDone = nil
 	project.Runtime.SupervisorResult = nil
 	// Cancel and clear any per-project activity listener context to avoid leaking goroutines.
@@ -170,6 +172,7 @@ func (m *Model) completeProjectAtIndex(projectIndex int) {
 		project.Runtime.CancelCtx()
 		project.Runtime.CancelCtx = nil
 	}
+	m.cancelProjectAgentRuns(project)
 	project.Runtime.SupervisorDone = nil
 	project.Runtime.SupervisorResult = nil
 	if project.Runtime.ActivityCancel != nil {
@@ -194,16 +197,58 @@ func (m *Model) completeProjectAtIndex(projectIndex int) {
 	m.refreshProjectAndSelection(projectIndex)
 }
 
-func (m *Model) startSelectedAgent() {
+func (m *Model) startSelectedAgent() tea.Cmd {
+	projectIndex := m.selectedProjectIndex()
 	project := m.selectedProject()
 	agentInstance := m.selectedAgent()
 	if project == nil || agentInstance == nil || agentInstance.State() == workers.Running || agentInstance.State() == workers.Completed {
-		return
+		return nil
 	}
+
+	agentIndex := m.selectedAgentIndex()
+	if project.Runtime.AgentRunResults != nil {
+		if _, alreadyRunning := project.Runtime.AgentRunResults[agentIndex]; alreadyRunning {
+			return nil
+		}
+	}
+
+	execution, err := m.buildSelectedAgentExecution(project)
+	if err != nil {
+		agentInstance.Run(context.Background())
+		m.persistProjectAgentStates(project)
+		m.refreshProjectAndSelection(projectIndex)
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan agentRunResult, 1)
+	if project.Runtime.AgentRunCancels == nil {
+		project.Runtime.AgentRunCancels = make(map[int]context.CancelFunc)
+	}
+	if project.Runtime.AgentRunResults == nil {
+		project.Runtime.AgentRunResults = make(map[int]chan agentRunResult)
+	}
+	project.Runtime.AgentRunCancels[agentIndex] = cancel
+	project.Runtime.AgentRunResults[agentIndex] = result
 
 	agentInstance.Run(context.Background())
 	m.persistProjectAgentStates(project)
-	m.refreshProjectAndSelection(m.selectedProjectIndex())
+	m.refreshProjectAndSelection(projectIndex)
+
+	executor := m.agentExecutor
+	if executor == nil {
+		executor = defaultAgentExecutor
+	}
+	logger := m.ensureProjectLogger(project)
+	workplace := project.Config.Workplace
+	agentName := agentInstance.Name()
+	go func() {
+		defer close(result)
+		output, runErr := executor(ctx, execution.Definition, workplace, agentName, execution.Prompt, logger)
+		result <- agentRunResult{Output: output, Err: runErr}
+	}()
+
+	return waitForAgentRun(agentRunSource{projectIndex: projectIndex, agentIndex: agentIndex, result: result})
 }
 
 func (m *Model) stopSelectedAgent() {
@@ -213,6 +258,7 @@ func (m *Model) stopSelectedAgent() {
 		return
 	}
 
+	m.cancelAgentRun(project, m.selectedAgentIndex())
 	agentInstance.Stop()
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(m.selectedProjectIndex())
@@ -248,19 +294,20 @@ func (m *Model) cycleSelectedProjectState() tea.Cmd {
 	}
 }
 
-func (m *Model) cycleSelectedAgentState() {
+func (m *Model) cycleSelectedAgentState() tea.Cmd {
 	agentInstance := m.selectedAgent()
 	if agentInstance == nil {
-		return
+		return nil
 	}
 	if agentInstance.State() == workers.Completed {
-		return
+		return nil
 	}
 
 	switch agentInstance.State() {
 	case workers.Stopped, workers.Failed:
-		m.startSelectedAgent()
+		return m.startSelectedAgent()
 	default:
 		m.stopSelectedAgent()
+		return nil
 	}
 }

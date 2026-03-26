@@ -23,6 +23,7 @@ type agentTableEntry struct {
 	Kind        planRowKind
 	AgentIndex  int
 	StreamIndex int
+	StepIndex   int
 }
 
 type runtimeAgentEntry struct {
@@ -66,7 +67,7 @@ func buildAgentTableRows(agents []workers.AgentContract, plan *Plan, collapsedSt
 			toggle = "[+]"
 		}
 		rows = append(rows, table.Row{"", fmt.Sprintf("%s Stream %d (%d tasks)", toggle, streamIndex+1, len(stream))})
-		rowEntries = append(rowEntries, agentTableEntry{Kind: planRowStream, AgentIndex: nonSelectableAgentIndex, StreamIndex: streamIndex})
+		rowEntries = append(rowEntries, agentTableEntry{Kind: planRowStream, AgentIndex: nonSelectableAgentIndex, StreamIndex: streamIndex, StepIndex: -1})
 
 		if collapsed {
 			continue
@@ -89,7 +90,7 @@ func buildAgentTableRows(agents []workers.AgentContract, plan *Plan, collapsedSt
 			}
 
 			rows = append(rows, table.Row{rowState, indentLabel(1, label)})
-			rowEntries = append(rowEntries, agentTableEntry{Kind: planRowAgent, AgentIndex: agentIndex, StreamIndex: streamIndex})
+			rowEntries = append(rowEntries, agentTableEntry{Kind: planRowAgent, AgentIndex: agentIndex, StreamIndex: streamIndex, StepIndex: stepIndex})
 		}
 	}
 
@@ -101,7 +102,7 @@ func buildFlatAgentTableRows(agents []workers.AgentContract) ([]table.Row, []age
 	rowEntries := make([]agentTableEntry, 0, len(agents))
 	for index, agentInstance := range agents {
 		rows = append(rows, table.Row{agentInstance.State().String(), agentInstance.Name()})
-		rowEntries = append(rowEntries, agentTableEntry{Kind: planRowAgent, AgentIndex: index, StreamIndex: -1})
+		rowEntries = append(rowEntries, agentTableEntry{Kind: planRowAgent, AgentIndex: index, StreamIndex: -1, StepIndex: -1})
 	}
 	return rows, rowEntries
 }
@@ -154,7 +155,7 @@ func buildUnplannedAgentRows(agents []workers.AgentContract, plannedAgents map[s
 		}
 
 		rows = append(rows, table.Row{agentInstance.State().String(), agentInstance.Name()})
-		rowEntries = append(rowEntries, agentTableEntry{Kind: planRowAgent, AgentIndex: index, StreamIndex: -1})
+		rowEntries = append(rowEntries, agentTableEntry{Kind: planRowAgent, AgentIndex: index, StreamIndex: -1, StepIndex: -1})
 	}
 
 	return rows, rowEntries
@@ -188,7 +189,7 @@ func (m *Model) rowIndexForStreamIndex(streamIndex int) int {
 func (m *Model) selectedAgentTableEntry() agentTableEntry {
 	rowIndex := m.agentTable.Cursor()
 	if rowIndex < 0 || rowIndex >= len(m.agentTableEntries) {
-		return agentTableEntry{Kind: planRowNone, AgentIndex: nonSelectableAgentIndex, StreamIndex: -1}
+		return agentTableEntry{Kind: planRowNone, AgentIndex: nonSelectableAgentIndex, StreamIndex: -1, StepIndex: -1}
 	}
 	return m.agentTableEntries[rowIndex]
 }
