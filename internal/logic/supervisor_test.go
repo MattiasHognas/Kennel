@@ -262,9 +262,14 @@ func TestRunPlanExecutesReviewerFollowUpPlan(t *testing.T) {
 	tracking := &trackingRepo{SQLiteRepository: repo}
 	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
-	var topics []string
+	var (
+		topics   []string
+		topicsMu sync.Mutex
+	)
 	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		topicsMu.Lock()
 		topics = append(topics, topic)
+		topicsMu.Unlock()
 
 		switch topic {
 		case "planner":
