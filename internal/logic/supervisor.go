@@ -631,7 +631,7 @@ func buildAgentTaskPrompt(agentName, task, previousOutput string, includePreviou
 
 	sections := []string{
 		prompt,
-		fmt.Sprintf("If you identify concrete follow-up work, append a final JSON code block with this schema: ```json\n{\"streams\":[[{\"agent\":\"agent-name\",\"task\":\"task description\"}]]}\n```"),
+		"If you identify concrete follow-up work, append a final JSON code block with this schema: ```json\n{\"streams\":[[{\"agent\":\"agent-name\",\"task\":\"task description\"}]]}\n```",
 		"Only include the JSON block when new work should be scheduled. Keep any review or test findings before the JSON block.",
 		fmt.Sprintf("Use only these exact agent names in follow-up tasks: %s", strings.Join(planningAgents, ", ")),
 	}
