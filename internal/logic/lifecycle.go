@@ -11,7 +11,6 @@ import (
 )
 
 func defaultAgentsDir() string {
-	// Allow an explicit override for the agents root directory.
 	if override := os.Getenv("KENNEL_ROOT_DIR"); override != "" {
 		return override
 	}
@@ -21,18 +20,14 @@ func defaultAgentsDir() string {
 		exeDir := filepath.Dir(exe)
 		agentsPath := filepath.Join(exeDir, "agents")
 		if info, statErr := os.Stat(agentsPath); statErr == nil && info.IsDir() {
-			// Use the executable directory when it contains an "agents" subdirectory.
 			return exeDir
 		}
 	}
 
-	// Fallback for development/debug runs (e.g. "go run", "dlv") where the
-	// temporary executable directory does not contain the "agents" folder.
 	if wd, err := os.Getwd(); err == nil {
 		return wd
 	}
 
-	// Last resort: fall back to the current directory string.
 	return "."
 }
 
@@ -129,12 +124,13 @@ func (m *Model) stopSelectedProject() {
 	m.cancelProjectAgentRuns(project)
 	project.Runtime.SupervisorDone = nil
 	project.Runtime.SupervisorResult = nil
-	// Cancel and clear any per-project activity listener context to avoid leaking goroutines.
+
 	if project.Runtime.ActivityCancel != nil {
 		project.Runtime.ActivityCancel()
 		project.Runtime.ActivityCancel = nil
 		project.Runtime.ActivityDone = nil
 	}
+
 	if project.Runtime.Supervisor != nil {
 		if project.Runtime.SupervisorEvents != nil {
 			project.Runtime.Supervisor.EventBus.Unsubscribe(data.SupervisorTopic, project.Runtime.SupervisorEvents)
@@ -143,7 +139,6 @@ func (m *Model) stopSelectedProject() {
 		project.Runtime.Supervisor = nil
 	}
 
-	// Currently keep old logic to stop individual agents if they have their own routines running outside the supervisor for now.
 	for _, agentInstance := range project.Runtime.Agents {
 		agentInstance.Stop()
 	}

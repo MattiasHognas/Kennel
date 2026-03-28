@@ -143,7 +143,7 @@ func TestFocusedAgentCyclesBetweenRunningAndStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "Worker")
+	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "Worker", "")
 	if err != nil {
 		t.Fatalf("add agent: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestRestartSelectedPlannedAgentUsesPreviousStreamOutputAfterStop(t *testing
 	var agentIDs []int64
 	runtimeAgents := make([]workers.AgentContract, 0, len(storedAgents))
 	for _, stored := range storedAgents {
-		agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, stored.name)
+		agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, stored.name, "")
 		if err != nil {
 			t.Fatalf("add agent %s: %v", stored.name, err)
 		}
@@ -326,7 +326,7 @@ func TestSelectedPlannedAgentOmitsPreviousOutputWhenDisabled(t *testing.T) {
 	var agentIDs []int64
 	runtimeAgents := make([]workers.AgentContract, 0, len(storedAgents))
 	for _, stored := range storedAgents {
-		agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, stored.name)
+		agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, stored.name, "")
 		if err != nil {
 			t.Fatalf("add agent %s: %v", stored.name, err)
 		}
@@ -418,7 +418,7 @@ func TestCompletedStatesAreNotChangedByUserControls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "Worker")
+	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "Worker", "")
 	if err != nil {
 		t.Fatalf("add agent: %v", err)
 	}

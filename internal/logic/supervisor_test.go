@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -246,8 +247,123 @@ func TestRunPlanOmitsPreviousOutputWhenAgentDisablesPromptContext(t *testing.T) 
 	if len(testerMessages) != 1 {
 		t.Fatalf("tester messages = %v, want exactly one prompt", testerMessages)
 	}
-	if testerMessages[0] != "Task: Run focused tests" {
-		t.Fatalf("tester prompt = %q, want task-only prompt", testerMessages[0])
+	if !strings.HasPrefix(testerMessages[0], "Task: Run focused tests") {
+		t.Fatalf("tester prompt = %q, want task prefix", testerMessages[0])
+	}
+	if strings.Contains(testerMessages[0], "Previous context/output:") {
+		t.Fatalf("tester prompt = %q, want no previous output", testerMessages[0])
+	}
+}
+
+func TestRunPlanExecutesReviewerFollowUpPlan(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "code-reviewer", "frontend-developer", "tester")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	var (
+		topics   []string
+		topicsMu sync.Mutex
+	)
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		topicsMu.Lock()
+		topics = append(topics, topic)
+		topicsMu.Unlock()
+
+		switch topic {
+		case "planner":
+			return &stubACPClient{response: `{"streams":[[{"agent":"code-reviewer","task":"Review the implementation"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready"}, nil
+		case "code-reviewer":
+			return &stubACPClient{response: "Review findings\n\n```json\n{\"streams\":[[{\"agent\":\"frontend-developer\",\"task\":\"Fix the review findings\"}],[{\"agent\":\"tester\",\"task\":\"Run regression coverage for the review fixes\"}]]}\n```"}, nil
+		case "frontend-developer":
+			return &stubACPClient{response: "review fixes applied"}, nil
+		case "tester":
+			return &stubACPClient{response: "review regression tests passed"}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"code-reviewer", "frontend-developer", "tester"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+
+	assertAgentState(t, stored.Agents, "code-reviewer", "completed", "Review findings\n\n```json\n{\"streams\":[[{\"agent\":\"frontend-developer\",\"task\":\"Fix the review findings\"}],[{\"agent\":\"tester\",\"task\":\"Run regression coverage for the review fixes\"}]]}\n```")
+	assertAgentState(t, stored.Agents, "frontend-developer", "completed", "review fixes applied")
+	assertAgentState(t, stored.Agents, "tester", "completed", "review regression tests passed")
+	assertActivityContains(t, stored.Activities, "code-reviewer: scheduled 2 follow-up stream(s)")
+
+	wantTopics := map[string]bool{
+		"planner":            false,
+		"branch-setup":       false,
+		"code-reviewer":      false,
+		"frontend-developer": false,
+		"tester":             false,
+	}
+	for _, topic := range topics {
+		if _, ok := wantTopics[topic]; ok {
+			wantTopics[topic] = true
+		}
+	}
+	for topic, seen := range wantTopics {
+		if !seen {
+			t.Fatalf("ACP topics = %v, want %s to execute", topics, topic)
+		}
+	}
+}
+
+func TestRunPlanExecutesTesterFollowUpPlan(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "tester", "docs-writer")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	var topics []string
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		topics = append(topics, topic)
+
+		switch topic {
+		case "planner":
+			return &stubACPClient{response: `{"streams":[[{"agent":"tester","task":"Run the acceptance suite"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready"}, nil
+		case "tester":
+			return &stubACPClient{response: "Acceptance tests found a missing docs update\n\n```json\n{\"streams\":[[{\"agent\":\"docs-writer\",\"task\":\"Document the newly verified behavior\"}]]}\n```"}, nil
+		case "docs-writer":
+			return &stubACPClient{response: "docs updated"}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"tester", "docs-writer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+
+	assertAgentState(t, stored.Agents, "tester", "completed", "Acceptance tests found a missing docs update\n\n```json\n{\"streams\":[[{\"agent\":\"docs-writer\",\"task\":\"Document the newly verified behavior\"}]]}\n```")
+	assertAgentState(t, stored.Agents, "docs-writer", "completed", "docs updated")
+	assertActivityContains(t, stored.Activities, "tester: scheduled 1 follow-up stream(s)")
+
+	if !strings.Contains(strings.Join(topics, ","), "docs-writer") {
+		t.Fatalf("ACP topics = %v, want docs-writer execution", topics)
 	}
 }
 
@@ -376,6 +492,83 @@ func TestRunPlanMarksPlannerFailedAndStopsProjectOnLaunchFailure(t *testing.T) {
 	assertActivityContains(t, stored.Activities, "planner: failed: planner launch failed")
 	if len(tracking.checkpoints) == 0 || tracking.checkpoints[len(tracking.checkpoints)-1] != "planning_failed" {
 		t.Fatalf("checkpoint statuses = %v, want planning_failed", tracking.checkpoints)
+	}
+}
+
+func TestRunPlanAllowsConcurrentInstancesOfSameAgent(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	// Two concurrent streams both reference frontend-developer; each should run
+	// as an independent instance so they can execute in parallel.
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	var (
+		concurrent    int32
+		maxConcurrent int32
+		concurrencyMu sync.Mutex
+		startCount    int32
+		allStarted    = make(chan struct{})
+		closeOnce     sync.Once
+	)
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		switch topic {
+		case "planner":
+			// Schedule the same agent type in two independent concurrent streams.
+			return &stubACPClient{response: `{"streams":[[{"agent":"frontend-developer","task":"Build UI"}],[{"agent":"frontend-developer","task":"Build tests"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready"}, nil
+		case "frontend-developer":
+			concurrencyMu.Lock()
+			concurrent++
+			if concurrent > maxConcurrent {
+				maxConcurrent = concurrent
+			}
+			concurrencyMu.Unlock()
+
+			// Close allStarted once both instances have entered concurrently.
+			if atomic.AddInt32(&startCount, 1) >= 2 {
+				closeOnce.Do(func() { close(allStarted) })
+			}
+			// Each instance waits until the other has also started, proving
+			// that both ran concurrently rather than one after the other.
+			<-allStarted
+
+			defer func() {
+				concurrencyMu.Lock()
+				concurrent--
+				concurrencyMu.Unlock()
+			}()
+			return &stubACPClient{response: "done"}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	if maxConcurrent < 2 {
+		t.Fatalf("frontend-developer max concurrent instances = %d, want at least 2", maxConcurrent)
+	}
+
+	// Verify that two separate DB agent records were created for the two instances.
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+	completedCount := 0
+	for _, agent := range stored.Agents {
+		if agent.Name == "frontend-developer" && agent.State == "completed" {
+			completedCount++
+		}
+	}
+	if completedCount != 2 {
+		t.Fatalf("completed frontend-developer agent records = %d, want 2", completedCount)
 	}
 }
 

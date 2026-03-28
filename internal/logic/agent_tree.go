@@ -51,12 +51,12 @@ func RestorePlanFromStoredAgents(agents []data.Agent) *Plan {
 	return nil
 }
 
-func buildAgentTableRows(agents []workers.AgentContract, plan *Plan, collapsedStreams map[int]bool) ([]table.Row, []agentTableEntry) {
+func buildAgentTableRows(agents []workers.AgentContract, agentInstanceKeys []string, plan *Plan, collapsedStreams map[int]bool) ([]table.Row, []agentTableEntry) {
 	if plan == nil || len(plan.Streams) == 0 {
 		return buildFlatAgentTableRows(agents)
 	}
 
-	lookup := buildRuntimeAgentLookup(agents)
+	lookup := buildRuntimeAgentLookup(agents, agentInstanceKeys)
 	plannedAgents := collectPlannedAgents(plan)
 	rows, rowEntries := buildUnplannedAgentRows(agents, plannedAgents)
 
@@ -74,7 +74,11 @@ func buildAgentTableRows(agents []workers.AgentContract, plan *Plan, collapsedSt
 		}
 
 		for stepIndex, step := range stream {
-			runtimeEntry, found := lookup[CanonicalAgentName(step.Agent)]
+			instanceKey := planStepInstanceKey(streamIndex, stepIndex)
+			runtimeEntry, found := lookup[instanceKey]
+			if !found {
+				runtimeEntry, found = lookup[CanonicalAgentName(step.Agent)]
+			}
 			rowState := "-"
 			displayName := strings.TrimSpace(step.Agent)
 			agentIndex := nonSelectableAgentIndex
@@ -107,18 +111,23 @@ func buildFlatAgentTableRows(agents []workers.AgentContract) ([]table.Row, []age
 	return rows, rowEntries
 }
 
-func buildRuntimeAgentLookup(agents []workers.AgentContract) map[string]runtimeAgentEntry {
+func buildRuntimeAgentLookup(agents []workers.AgentContract, agentInstanceKeys []string) map[string]runtimeAgentEntry {
 	lookup := make(map[string]runtimeAgentEntry, len(agents))
 	for index, agentInstance := range agents {
-		canonicalName := CanonicalAgentName(agentInstance.Name())
-		if canonicalName == "" {
+		var key string
+		if index < len(agentInstanceKeys) && agentInstanceKeys[index] != "" {
+			key = agentInstanceKeys[index]
+		} else {
+			key = CanonicalAgentName(agentInstance.Name())
+		}
+		if key == "" {
 			continue
 		}
-		if _, exists := lookup[canonicalName]; exists {
+		if _, exists := lookup[key]; exists {
 			continue
 		}
 
-		lookup[canonicalName] = runtimeAgentEntry{
+		lookup[key] = runtimeAgentEntry{
 			AgentIndex: index,
 			Name:       agentInstance.Name(),
 			State:      agentInstance.State().String(),
