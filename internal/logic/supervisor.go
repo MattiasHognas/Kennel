@@ -843,11 +843,19 @@ func extractPlanJSON(output string) string {
 
 func extractFollowUpPlanJSON(output string) (string, bool) {
 	jsonBlockRegex := regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```")
-	for _, matches := range jsonBlockRegex.FindAllStringSubmatch(output, -1) {
-		candidate := strings.TrimSpace(matches[1])
-		if strings.Contains(candidate, `"streams"`) {
-			return candidate, true
+	matches := jsonBlockRegex.FindAllStringSubmatch(output, -1)
+	var lastCandidate string
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
 		}
+		candidate := strings.TrimSpace(m[1])
+		if strings.Contains(candidate, `"streams"`) {
+			lastCandidate = candidate
+		}
+	}
+	if lastCandidate != "" {
+		return lastCandidate, true
 	}
 
 	trimmed := strings.TrimSpace(output)
