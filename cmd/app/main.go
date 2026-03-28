@@ -196,7 +196,7 @@ func seedSampleProjects(repository *data.SQLiteRepository) error {
 		}
 
 		for _, agentInstance := range definition.Runtime.Agents {
-			if _, err := repository.AddAgentToProject(context.Background(), project.ID, agentInstance.Name()); err != nil {
+			if _, err := repository.AddAgentToProject(context.Background(), project.ID, agentInstance.Name(), ""); err != nil {
 				return err
 			}
 		}

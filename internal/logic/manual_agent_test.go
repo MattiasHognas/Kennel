@@ -54,7 +54,7 @@ func TestWaitForAgentRunHandlesClosedChannel(t *testing.T) {
 func TestHandleAgentRunCompletedMarksAgentFailedAndClearsRunState(t *testing.T) {
 	repo := newTestRepository(t)
 	projectRecord := newTestProject(t, repo)
-	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "tester")
+	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "tester", "")
 	if err != nil {
 		t.Fatalf("add agent: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestHandleAgentRunCompletedMarksAgentFailedAndClearsRunState(t *testing.T) 
 func TestHandleAgentRunCompletedIgnoresCanceledRun(t *testing.T) {
 	repo := newTestRepository(t)
 	projectRecord := newTestProject(t, repo)
-	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "tester")
+	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "tester", "")
 	if err != nil {
 		t.Fatalf("add agent: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestHandleAgentRunCompletedIgnoresCanceledRun(t *testing.T) {
 func TestHandleAgentRunCompletedIgnoresStaleSource(t *testing.T) {
 	repo := newTestRepository(t)
 	projectRecord := newTestProject(t, repo)
-	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "tester")
+	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "tester", "")
 	if err != nil {
 		t.Fatalf("add agent: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestBuildSelectedAgentExecutionRejectsNonPlannedSelection(t *testing.T) {
 func TestBuildSelectedAgentExecutionErrorsWhenDefinitionMissing(t *testing.T) {
 	repo := newTestRepository(t)
 	projectRecord := newTestProject(t, repo)
-	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "planner")
+	agentRecord, err := repo.AddAgentToProject(context.Background(), projectRecord.ID, "planner", "")
 	if err != nil {
 		t.Fatalf("add planner: %v", err)
 	}

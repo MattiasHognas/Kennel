@@ -34,21 +34,22 @@ type ProjectState struct {
 }
 
 type ProjectRuntime struct {
-	Agents           []workers.AgentContract
-	AgentIDs         []int64
-	Plan             *Plan
-	CollapsedStreams map[int]bool
-	AgentRunCancels  map[int]context.CancelFunc
-	AgentRunResults  map[int]chan agentRunResult
-	Logger           *data.ProjectLogger
-	Activities       []ActivityEntry
-	ActivityDone     <-chan struct{}
-	ActivityCancel   context.CancelFunc
-	Supervisor       *Supervisor
-	SupervisorEvents data.EventChan
-	SupervisorDone   <-chan struct{}
-	SupervisorResult <-chan error
-	CancelCtx        context.CancelFunc
+	Agents            []workers.AgentContract
+	AgentIDs          []int64
+	AgentInstanceKeys []string
+	Plan              *Plan
+	CollapsedStreams  map[int]bool
+	AgentRunCancels   map[int]context.CancelFunc
+	AgentRunResults   map[int]chan agentRunResult
+	Logger            *data.ProjectLogger
+	Activities        []ActivityEntry
+	ActivityDone      <-chan struct{}
+	ActivityCancel    context.CancelFunc
+	Supervisor        *Supervisor
+	SupervisorEvents  data.EventChan
+	SupervisorDone    <-chan struct{}
+	SupervisorResult  <-chan error
+	CancelCtx         context.CancelFunc
 }
 
 type Project struct {
@@ -460,7 +461,7 @@ func (m *Model) refreshSelectedProjectTablesForEntry(selectedEntry agentTableEnt
 		return
 	}
 
-	agentRows, agentEntries := buildAgentTableRows(project.Runtime.Agents, project.Runtime.Plan, project.Runtime.CollapsedStreams)
+	agentRows, agentEntries := buildAgentTableRows(project.Runtime.Agents, project.Runtime.AgentInstanceKeys, project.Runtime.Plan, project.Runtime.CollapsedStreams)
 	if len(agentRows) == 0 {
 		agentRows = append(agentRows, table.Row{"-", "No plan yet"})
 		agentEntries = []agentTableEntry{{Kind: planRowNone, AgentIndex: nonSelectableAgentIndex, StreamIndex: -1}}
@@ -792,7 +793,11 @@ func (m *Model) applySupervisorSync(source supervisorSource, syncEvent data.Supe
 		}
 	}
 
-	if agentIndex == -1 && agentName != "" {
+	// Only fall back to name lookup when no AgentID is provided; if an AgentID
+	// was given but not found the event refers to a new instance that must be
+	// added as a distinct entry regardless of whether an agent with the same
+	// name already exists.
+	if agentIndex == -1 && syncEvent.AgentID == 0 && agentName != "" {
 		for index, agentInstance := range project.Runtime.Agents {
 			if agentInstance.Name() == agentName {
 				agentIndex = index
@@ -807,6 +812,7 @@ func (m *Model) applySupervisorSync(source supervisorSource, syncEvent data.Supe
 		restoredAgent.Hydrate(state)
 		project.Runtime.Agents = append(project.Runtime.Agents, restoredAgent)
 		project.Runtime.AgentIDs = append(project.Runtime.AgentIDs, syncEvent.AgentID)
+		project.Runtime.AgentInstanceKeys = append(project.Runtime.AgentInstanceKeys, syncEvent.InstanceKey)
 		agentIndex = len(project.Runtime.Agents) - 1
 		activitySources = m.resetActivitySourcesForProject(source.projectIndex)
 	} else if agentIndex >= 0 {
@@ -882,9 +888,11 @@ func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 
 	agents := make([]workers.AgentContract, 0, len(storedProject.Agents))
 	agentIDs := make([]int64, 0, len(storedProject.Agents))
+	agentInstanceKeys := make([]string, 0, len(storedProject.Agents))
 	for _, storedAgent := range storedProject.Agents {
 		agents = append(agents, restorePersistedAgent(storedAgent.Name, storedAgent.State))
 		agentIDs = append(agentIDs, storedAgent.ID)
+		agentInstanceKeys = append(agentInstanceKeys, storedAgent.InstanceKey)
 	}
 
 	activities := make([]ActivityEntry, 0, len(storedProject.Activities))
@@ -900,19 +908,20 @@ func (m *Model) syncProjectFromRepository(projectIndex int) []ActivitySource {
 	project.Config.Instructions = storedProject.Instructions
 	project.State.State = parseAgentState(storedProject.State)
 	project.Runtime = ProjectRuntime{
-		Agents:           agents,
-		AgentIDs:         agentIDs,
-		Plan:             RestorePlanFromStoredAgents(storedProject.Agents),
-		CollapsedStreams: map[int]bool{},
-		AgentRunCancels:  preservedAgentRunCancels,
-		AgentRunResults:  preservedAgentRunResults,
-		Logger:           preservedLogger,
-		Activities:       activities,
-		Supervisor:       preservedSupervisor,
-		SupervisorEvents: preservedSupervisorEvents,
-		SupervisorDone:   preservedSupervisorDone,
-		SupervisorResult: preservedSupervisorResult,
-		CancelCtx:        preservedCancel,
+		Agents:            agents,
+		AgentIDs:          agentIDs,
+		AgentInstanceKeys: agentInstanceKeys,
+		Plan:              RestorePlanFromStoredAgents(storedProject.Agents),
+		CollapsedStreams:  map[int]bool{},
+		AgentRunCancels:   preservedAgentRunCancels,
+		AgentRunResults:   preservedAgentRunResults,
+		Logger:            preservedLogger,
+		Activities:        activities,
+		Supervisor:        preservedSupervisor,
+		SupervisorEvents:  preservedSupervisorEvents,
+		SupervisorDone:    preservedSupervisorDone,
+		SupervisorResult:  preservedSupervisorResult,
+		CancelCtx:         preservedCancel,
 	}
 	sources := m.resetActivitySourcesForProject(projectIndex)
 

@@ -33,7 +33,8 @@ type Plan struct {
 
 type executionTask struct {
 	PlanTask
-	ForceRun bool
+	InstanceKey string
+	ForceRun    bool
 }
 
 type executionStream []executionTask
@@ -65,7 +66,7 @@ const (
 )
 
 type Repository interface {
-	AddAgentToProject(ctx context.Context, projectID int64, name string) (data.Agent, error)
+	AddAgentToProject(ctx context.Context, projectID int64, name, instanceKey string) (data.Agent, error)
 	CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error
 	NewActivity(ctx context.Context, projectID int64, agentID sql.NullInt64, text string) (data.Activity, error)
 	ReadProject(ctx context.Context, projectID int64) (data.Project, error)
@@ -147,9 +148,13 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 	completedBeforeRun := make(map[string]struct{})
 	var agentStateMu sync.RWMutex
 	for _, a := range proj.Agents {
-		agentStateMap[a.Name] = a
+		key := a.InstanceKey
+		if key == "" {
+			key = a.Name
+		}
+		agentStateMap[key] = a
 		if a.State == "completed" {
-			completedBeforeRun[a.Name] = struct{}{}
+			completedBeforeRun[key] = struct{}{}
 		}
 	}
 
@@ -176,7 +181,7 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 	var planOutput string
 	plannerRec, plannerFound := agentStateMap[plannerTask.Agent]
 	if !plannerFound {
-		plannerRec, err = s.Repo.AddAgentToProject(ctx, s.ProjectID, plannerTask.Agent)
+		plannerRec, err = s.Repo.AddAgentToProject(ctx, s.ProjectID, plannerTask.Agent, plannerTask.Agent)
 		if err != nil {
 			return s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("add agent %s: %w", plannerTask.Agent, err))
 		}
@@ -232,7 +237,8 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
 	}
 
-	if err := s.ensurePlanAgents(ctx, plan, agentMap, agentStateMap); err != nil {
+	mainStreams, err := s.prepareExecutionStreams(ctx, plan, 0, agentMap, agentStateMap, false)
+	if err != nil {
 		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
 	}
 	s.publishPlan(plan)
@@ -254,7 +260,13 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 	var setupOut string
 	branchSetupRec, branchSetupFound := agentStateMap[branchSetupTask.Agent]
 	if !branchSetupFound {
-		return s.failStop(ctx, 1, "agent_state_not_found", fmt.Errorf("agent state for %s not found", branchSetupTask.Agent))
+		branchSetupRec, err = s.Repo.AddAgentToProject(ctx, s.ProjectID, branchSetupTask.Agent, branchSetupTask.Agent)
+		if err != nil {
+			return s.failStop(ctx, 1, "agent_state_not_found", fmt.Errorf("add agent %s: %w", branchSetupTask.Agent, err))
+		}
+		agentStateMap[branchSetupTask.Agent] = branchSetupRec
+		s.logAgentCreated(branchSetupRec.Name)
+		s.publishSync(branchSetupRec, branchSetupRec.State, "")
 	}
 
 	if branchSetupRec.State != "completed" {
@@ -315,7 +327,7 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		agentLocksMu:       &sync.Mutex{},
 	}
 
-	if err := s.executePlan(ctx, planToExecutionStreams(plan, false), setupOut, execState); err != nil {
+	if err := s.executePlan(ctx, mainStreams, setupOut, execState); err != nil {
 		return s.failStop(ctx, -1, "stream_execution_failed", err)
 	}
 
@@ -428,30 +440,56 @@ func availablePlanningAgents(agentMap map[string]data.AgentDefinition, configure
 	return selected
 }
 
-func (s *Supervisor) ensurePlanAgents(ctx context.Context, plan Plan, agentMap map[string]data.AgentDefinition, agentStateMap map[string]data.Agent) error {
-	requiredAgents := collectRequiredAgents(plan)
-
-	for _, agentName := range requiredAgents {
-		if _, ok := agentMap[agentName]; !ok {
-			return fmt.Errorf("agent %s not found", agentName)
+// prepareExecutionStreams validates that all agents in the plan exist, creates
+// per-step agent DB records keyed by unique instance keys, and returns execution
+// streams with those instance keys embedded. streamOffset is the number of
+// streams already present in the published plan (used to generate globally unique
+// instance keys when processing follow-up plans).
+func (s *Supervisor) prepareExecutionStreams(ctx context.Context, plan Plan, streamOffset int, agentMap map[string]data.AgentDefinition, agentStateMap map[string]data.Agent, forceRun bool) ([]executionStream, error) {
+	// Validate that every agent referenced in the plan has a definition.
+	for _, stream := range plan.Streams {
+		for _, task := range stream {
+			if _, ok := agentMap[task.Agent]; !ok {
+				return nil, fmt.Errorf("agent %s not found", task.Agent)
+			}
 		}
 	}
 
-	for _, agentName := range requiredAgents {
-		if _, found := agentStateMap[agentName]; found {
-			continue
-		}
+	streams := make([]executionStream, 0, len(plan.Streams))
+	for localStreamIdx, stream := range plan.Streams {
+		globalStreamIdx := streamOffset + localStreamIdx
+		execution := make(executionStream, 0, len(stream))
+		for stepIdx, task := range stream {
+			instanceKey := planStepInstanceKey(globalStreamIdx, stepIdx)
 
-		agentRec, err := s.Repo.AddAgentToProject(ctx, s.ProjectID, agentName)
-		if err != nil {
-			return fmt.Errorf("add agent %s: %w", agentName, err)
+			if _, found := agentStateMap[instanceKey]; !found {
+				agentRec, err := s.Repo.AddAgentToProject(ctx, s.ProjectID, task.Agent, instanceKey)
+				if err != nil {
+					return nil, fmt.Errorf("add agent %s: %w", task.Agent, err)
+				}
+				agentStateMap[instanceKey] = agentRec
+				s.logAgentCreated(task.Agent)
+				s.publishSync(agentRec, agentRec.State, "")
+			}
+
+			execution = append(execution, executionTask{
+				PlanTask:    task,
+				InstanceKey: instanceKey,
+				ForceRun:    forceRun,
+			})
 		}
-		agentStateMap[agentName] = agentRec
-		s.logAgentCreated(agentName)
-		s.publishSync(agentRec, agentRec.State, "")
+		streams = append(streams, execution)
 	}
+	return streams, nil
+}
 
-	return nil
+// planStepInstanceKey returns the unique key for the agent instance at the
+// given stream and step position within the published plan. The format
+// "s<streamIndex>:t<stepIndex>" is stored in the database and must remain
+// stable across restarts so that completed steps can be correctly identified
+// on resume.
+func planStepInstanceKey(streamIndex, stepIndex int) string {
+	return fmt.Sprintf("s%d:t%d", streamIndex, stepIndex)
 }
 
 func collectRequiredAgents(plan Plan) []string {
@@ -472,18 +510,6 @@ func collectRequiredAgents(plan Plan) []string {
 	}
 
 	return requiredAgents
-}
-
-func planToExecutionStreams(plan Plan, forceRun bool) []executionStream {
-	streams := make([]executionStream, 0, len(plan.Streams))
-	for _, stream := range plan.Streams {
-		execution := make(executionStream, 0, len(stream))
-		for _, task := range stream {
-			execution = append(execution, executionTask{PlanTask: task, ForceRun: forceRun})
-		}
-		streams = append(streams, execution)
-	}
-	return streams
 }
 
 func (s *Supervisor) executePlan(ctx context.Context, streams []executionStream, initialPrompt string, state *executionState) error {
@@ -508,9 +534,9 @@ func (s *Supervisor) executePlan(ctx context.Context, streams []executionStream,
 }
 
 func (s *Supervisor) executeTask(ctx context.Context, step executionTask, currentPrompt string, state *executionState) (string, error) {
-	// Serialize execution for the same agent across concurrent streams to
-	// prevent concurrent ACP sessions and concurrent state/DB updates.
-	agentLock := getAgentLock(state, step.Agent)
+	// Use a per-instance lock so that each unique task instance has independent
+	// execution, allowing the same agent type to run concurrently across streams.
+	agentLock := getAgentLock(state, step.InstanceKey)
 	agentLock.Lock()
 	defer agentLock.Unlock()
 
@@ -520,9 +546,9 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 	}
 
 	state.agentStateMu.RLock()
-	agentRec, found := state.agentStateMap[step.Agent]
-	_, completedBeforeRun := state.completedBeforeRun[step.Agent]
-	_, executedThisRun := state.executedAgents[step.Agent]
+	agentRec, found := state.agentStateMap[step.InstanceKey]
+	_, completedBeforeRun := state.completedBeforeRun[step.InstanceKey]
+	_, executedThisRun := state.executedAgents[step.InstanceKey]
 	state.agentStateMu.RUnlock()
 	if !found {
 		return "", fmt.Errorf("agent %s not found in project state", step.Agent)
@@ -542,7 +568,7 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 
 	agentRec.State = "running"
 	state.agentStateMu.Lock()
-	state.agentStateMap[step.Agent] = agentRec
+	state.agentStateMap[step.InstanceKey] = agentRec
 	state.agentStateMu.Unlock()
 
 	wrapper, err := s.AcpFactory(ctx, def, s.EventBus, s.Workplace, step.Agent)
@@ -572,8 +598,8 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 		agentRec.Output = out
 		agentRec.State = "completed"
 		state.agentStateMu.Lock()
-		state.agentStateMap[step.Agent] = agentRec
-		state.executedAgents[step.Agent] = struct{}{}
+		state.agentStateMap[step.InstanceKey] = agentRec
+		state.executedAgents[step.InstanceKey] = struct{}{}
 		state.agentStateMu.Unlock()
 	}
 
@@ -591,7 +617,11 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 			return "", fmt.Errorf("follow-up plan validation failed for %s: %w", step.Agent, err)
 		}
 
-		ensureErr := s.ensurePlanAgents(ctx, followUpPlan, state.agentMap, state.agentStateMap)
+		state.planMu.Lock()
+		followUpStreamOffset := len(state.publishedPlan.Streams)
+		state.planMu.Unlock()
+
+		followUpStreams, ensureErr := s.prepareExecutionStreams(ctx, followUpPlan, followUpStreamOffset, state.agentMap, state.agentStateMap, true)
 		if ensureErr != nil {
 			return "", fmt.Errorf("follow-up plan validation failed for %s: %w", step.Agent, ensureErr)
 		}
@@ -599,7 +629,7 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 		s.recordAgentActivity(ctx, agentRec, fmt.Sprintf("scheduled %d follow-up stream(s)", len(followUpPlan.Streams)))
 		s.publishPlan(appendPublishedPlan(state, followUpPlan))
 
-		if err := s.executePlan(ctx, planToExecutionStreams(followUpPlan, true), out, state); err != nil {
+		if err := s.executePlan(ctx, followUpStreams, out, state); err != nil {
 			return "", err
 		}
 	}
@@ -825,11 +855,12 @@ func (s *Supervisor) publishSync(agent data.Agent, state, activity string) {
 	}
 
 	s.EventBus.Publish(data.SupervisorTopic, data.Event{Payload: data.SupervisorSyncEvent{
-		ProjectID: s.ProjectID,
-		AgentID:   agent.ID,
-		Agent:     agent.Name,
-		State:     state,
-		Activity:  activity,
+		ProjectID:   s.ProjectID,
+		AgentID:     agent.ID,
+		Agent:       agent.Name,
+		InstanceKey: agent.InstanceKey,
+		State:       state,
+		Activity:    activity,
 	}})
 }
 

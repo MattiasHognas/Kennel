@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -494,10 +495,11 @@ func TestRunPlanMarksPlannerFailedAndStopsProjectOnLaunchFailure(t *testing.T) {
 	}
 }
 
-func TestRunPlanSerializesConcurrentStreamsWithSameAgent(t *testing.T) {
+func TestRunPlanAllowsConcurrentInstancesOfSameAgent(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
-	// Two concurrent streams both reference frontend-developer.
+	// Two concurrent streams both reference frontend-developer; each should run
+	// as an independent instance so they can execute in parallel.
 	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
 	eb := data.NewEventBus()
 	tracking := &trackingRepo{SQLiteRepository: repo}
@@ -507,11 +509,14 @@ func TestRunPlanSerializesConcurrentStreamsWithSameAgent(t *testing.T) {
 		concurrent    int32
 		maxConcurrent int32
 		concurrencyMu sync.Mutex
+		startCount    int32
+		allStarted    = make(chan struct{})
+		closeOnce     sync.Once
 	)
 	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
 		switch topic {
 		case "planner":
-			// Schedule the same agent (frontend-developer) in two concurrent streams.
+			// Schedule the same agent type in two independent concurrent streams.
 			return &stubACPClient{response: `{"streams":[[{"agent":"frontend-developer","task":"Build UI"}],[{"agent":"frontend-developer","task":"Build tests"}]]}`}, nil
 		case "branch-setup":
 			return &stubACPClient{response: "branch ready"}, nil
@@ -522,8 +527,15 @@ func TestRunPlanSerializesConcurrentStreamsWithSameAgent(t *testing.T) {
 				maxConcurrent = concurrent
 			}
 			concurrencyMu.Unlock()
-			// Yield to allow another goroutine to interleave if the per-agent
-			// lock is not held during the full execution window.
+
+			// Close allStarted once both instances have entered concurrently.
+			if atomic.AddInt32(&startCount, 1) >= 2 {
+				closeOnce.Do(func() { close(allStarted) })
+			}
+			// Each instance waits until the other has also started, proving
+			// that both ran concurrently rather than one after the other.
+			<-allStarted
+
 			defer func() {
 				concurrencyMu.Lock()
 				concurrent--
@@ -540,8 +552,23 @@ func TestRunPlanSerializesConcurrentStreamsWithSameAgent(t *testing.T) {
 		t.Fatalf("RunPlan returned error: %v", err)
 	}
 
-	if maxConcurrent > 1 {
-		t.Fatalf("frontend-developer ran %d concurrent instances, want at most 1", maxConcurrent)
+	if maxConcurrent < 2 {
+		t.Fatalf("frontend-developer max concurrent instances = %d, want at least 2", maxConcurrent)
+	}
+
+	// Verify that two separate DB agent records were created for the two instances.
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+	completedCount := 0
+	for _, agent := range stored.Agents {
+		if agent.Name == "frontend-developer" && agent.State == "completed" {
+			completedCount++
+		}
+	}
+	if completedCount != 2 {
+		t.Fatalf("completed frontend-developer agent records = %d, want 2", completedCount)
 	}
 }
 

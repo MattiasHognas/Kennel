@@ -19,12 +19,12 @@ func TestShutdownStopsRunningAgentsAndPersistsActivity(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 
-	runningAgentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "Runner")
+	runningAgentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "Runner", "")
 	if err != nil {
 		t.Fatalf("create running agent: %v", err)
 	}
 
-	stoppedAgentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "Idle")
+	stoppedAgentRecord, err := repo.AddAgentToProject(context.Background(), storedProject.ID, "Idle", "")
 	if err != nil {
 		t.Fatalf("create stopped agent: %v", err)
 	}
