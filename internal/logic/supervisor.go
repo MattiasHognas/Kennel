@@ -48,6 +48,8 @@ type executionState struct {
 	stepCounter        *int64
 	publishedPlan      *Plan
 	planMu             *sync.Mutex
+	agentLocks         map[string]*sync.Mutex
+	agentLocksMu       *sync.Mutex
 }
 
 func ParsePlanOutput(output string) (Plan, error) {
@@ -309,6 +311,8 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		stepCounter:        &stepCounter,
 		publishedPlan:      &plan,
 		planMu:             planMu,
+		agentLocks:         make(map[string]*sync.Mutex),
+		agentLocksMu:       &sync.Mutex{},
 	}
 
 	if err := s.executePlan(ctx, planToExecutionStreams(plan, false), setupOut, execState); err != nil {
@@ -504,6 +508,12 @@ func (s *Supervisor) executePlan(ctx context.Context, streams []executionStream,
 }
 
 func (s *Supervisor) executeTask(ctx context.Context, step executionTask, currentPrompt string, state *executionState) (string, error) {
+	// Serialize execution for the same agent across concurrent streams to
+	// prevent concurrent ACP sessions and concurrent state/DB updates.
+	agentLock := getAgentLock(state, step.Agent)
+	agentLock.Lock()
+	defer agentLock.Unlock()
+
 	def, ok := state.agentMap[step.Agent]
 	if !ok {
 		return "", fmt.Errorf("agent %s not found", step.Agent)
@@ -603,6 +613,18 @@ func appendPublishedPlan(state *executionState, followUpPlan Plan) Plan {
 
 	state.publishedPlan.Streams = append(state.publishedPlan.Streams, followUpPlan.Streams...)
 	return clonePlan(*state.publishedPlan)
+}
+
+func getAgentLock(state *executionState, agentName string) *sync.Mutex {
+	state.agentLocksMu.Lock()
+	defer state.agentLocksMu.Unlock()
+
+	if mu, ok := state.agentLocks[agentName]; ok {
+		return mu
+	}
+	mu := &sync.Mutex{}
+	state.agentLocks[agentName] = mu
+	return mu
 }
 
 func clonePlan(plan Plan) Plan {

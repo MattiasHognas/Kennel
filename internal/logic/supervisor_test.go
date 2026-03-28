@@ -494,6 +494,57 @@ func TestRunPlanMarksPlannerFailedAndStopsProjectOnLaunchFailure(t *testing.T) {
 	}
 }
 
+func TestRunPlanSerializesConcurrentStreamsWithSameAgent(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	// Two concurrent streams both reference frontend-developer.
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+
+	var (
+		concurrent    int32
+		maxConcurrent int32
+		concurrencyMu sync.Mutex
+	)
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		switch topic {
+		case "planner":
+			// Schedule the same agent (frontend-developer) in two concurrent streams.
+			return &stubACPClient{response: `{"streams":[[{"agent":"frontend-developer","task":"Build UI"}],[{"agent":"frontend-developer","task":"Build tests"}]]}`}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "branch ready"}, nil
+		case "frontend-developer":
+			concurrencyMu.Lock()
+			concurrent++
+			if concurrent > maxConcurrent {
+				maxConcurrent = concurrent
+			}
+			concurrencyMu.Unlock()
+			// Yield to allow another goroutine to interleave if the per-agent
+			// lock is not held during the full execution window.
+			defer func() {
+				concurrencyMu.Lock()
+				concurrent--
+				concurrencyMu.Unlock()
+			}()
+			return &stubACPClient{response: "done"}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	if maxConcurrent > 1 {
+		t.Fatalf("frontend-developer ran %d concurrent instances, want at most 1", maxConcurrent)
+	}
+}
+
 func newTestRepository(t *testing.T) *data.SQLiteRepository {
 	t.Helper()
 
