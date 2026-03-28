@@ -581,9 +581,7 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 			return "", fmt.Errorf("follow-up plan validation failed for %s: %w", step.Agent, err)
 		}
 
-		state.agentStateMu.Lock()
 		ensureErr := s.ensurePlanAgents(ctx, followUpPlan, state.agentMap, state.agentStateMap)
-		state.agentStateMu.Unlock()
 		if ensureErr != nil {
 			return "", fmt.Errorf("follow-up plan validation failed for %s: %w", step.Agent, ensureErr)
 		}
