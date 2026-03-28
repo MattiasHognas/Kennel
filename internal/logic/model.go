@@ -793,10 +793,6 @@ func (m *Model) applySupervisorSync(source supervisorSource, syncEvent data.Supe
 		}
 	}
 
-	// Only fall back to name lookup when no AgentID is provided; if an AgentID
-	// was given but not found the event refers to a new instance that must be
-	// added as a distinct entry regardless of whether an agent with the same
-	// name already exists.
 	if agentIndex == -1 && syncEvent.AgentID == 0 && agentName != "" {
 		for index, agentInstance := range project.Runtime.Agents {
 			if agentInstance.Name() == agentName {

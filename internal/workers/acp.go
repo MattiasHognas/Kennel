@@ -170,7 +170,6 @@ func (w *Wrapper) promptOnce(ctx context.Context, promptText string) (string, er
 	textChan := make(chan string, 100)
 
 	w.handler.mu.Lock()
-	// Channel to signal and stream text chunks
 	w.handler.textChan = textChan
 	w.handler.mu.Unlock()
 
@@ -183,7 +182,6 @@ func (w *Wrapper) promptOnce(ctx context.Context, promptText string) (string, er
 				acp.TextBlock(promptText),
 			},
 		})
-		// The acp-go-sdk signals termination here by returning from Prompt.
 		errChan <- err
 
 		w.handler.mu.Lock()
@@ -194,7 +192,6 @@ func (w *Wrapper) promptOnce(ctx context.Context, promptText string) (string, er
 	}()
 
 	var sb strings.Builder
-	// Block and aggregate chunks until the agent finishes processing
 	for chunk := range textChan {
 		sb.WriteString(chunk)
 	}
@@ -490,8 +487,6 @@ func (c *localClient) checkInWorkplace(targetPath string) (string, error) {
 	} else if !os.IsNotExist(evalErr) {
 		return "", evalErr
 	} else {
-		// Target (or some parent) does not exist. Walk up to the deepest existing
-		// ancestor directory, resolve its symlinks, and then reconstruct the full path.
 		originalTarget := resolvedTarget
 		dir := filepath.Dir(originalTarget)
 
@@ -510,7 +505,6 @@ func (c *localClient) checkInWorkplace(targetPath string) (string, error) {
 			}
 			nextDir := filepath.Dir(dir)
 			if nextDir == dir {
-				// Reached filesystem root without finding an existing ancestor.
 				return "", ancestorErr
 			}
 			dir = nextDir

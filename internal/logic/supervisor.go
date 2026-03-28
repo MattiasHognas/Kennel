@@ -440,13 +440,7 @@ func availablePlanningAgents(agentMap map[string]data.AgentDefinition, configure
 	return selected
 }
 
-// prepareExecutionStreams validates that all agents in the plan exist, creates
-// per-step agent DB records keyed by unique instance keys, and returns execution
-// streams with those instance keys embedded. streamOffset is the number of
-// streams already present in the published plan (used to generate globally unique
-// instance keys when processing follow-up plans).
 func (s *Supervisor) prepareExecutionStreams(ctx context.Context, plan Plan, streamOffset int, agentMap map[string]data.AgentDefinition, agentStateMap map[string]data.Agent, forceRun bool) ([]executionStream, error) {
-	// Validate that every agent referenced in the plan has a definition.
 	for _, stream := range plan.Streams {
 		for _, task := range stream {
 			if _, ok := agentMap[task.Agent]; !ok {
@@ -483,11 +477,6 @@ func (s *Supervisor) prepareExecutionStreams(ctx context.Context, plan Plan, str
 	return streams, nil
 }
 
-// planStepInstanceKey returns the unique key for the agent instance at the
-// given stream and step position within the published plan. The format
-// "s<streamIndex>:t<stepIndex>" is stored in the database and must remain
-// stable across restarts so that completed steps can be correctly identified
-// on resume.
 func planStepInstanceKey(streamIndex, stepIndex int) string {
 	return fmt.Sprintf("s%d:t%d", streamIndex, stepIndex)
 }
@@ -534,8 +523,6 @@ func (s *Supervisor) executePlan(ctx context.Context, streams []executionStream,
 }
 
 func (s *Supervisor) executeTask(ctx context.Context, step executionTask, currentPrompt string, state *executionState) (string, error) {
-	// Use a per-instance lock so that each unique task instance has independent
-	// execution, allowing the same agent type to run concurrently across streams.
 	agentLock := getAgentLock(state, step.InstanceKey)
 	agentLock.Lock()
 	defer agentLock.Unlock()

@@ -168,7 +168,6 @@ func LoadAgentDefinitions(rootDir string) ([]AgentDefinition, error) {
 
 	var definitions []AgentDefinition
 
-	// Default Config
 	defaultConfig := defaultAgentConfig()
 	defaultConfigPath := filepath.Join(agentsDir, "default.json")
 	if data, err := os.ReadFile(defaultConfigPath); err == nil {
@@ -191,7 +190,6 @@ func LoadAgentDefinitions(rootDir string) ([]AgentDefinition, error) {
 		agentPath := filepath.Join(agentsDir, agentName)
 		instructionsPath := filepath.Join(agentPath, "instructions.md")
 
-		// Ensure instructions.md exists
 		if _, err := os.Stat(instructionsPath); os.IsNotExist(err) {
 			continue
 		}

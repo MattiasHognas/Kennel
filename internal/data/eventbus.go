@@ -4,7 +4,6 @@ import "sync"
 
 const SupervisorTopic = "supervisor"
 
-// Execution event types
 type PlanUpdateEvent struct{ Plan string }
 type SupervisorSyncEvent struct {
 	ProjectID   int64

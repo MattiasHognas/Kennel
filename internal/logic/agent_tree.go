@@ -77,7 +77,6 @@ func buildAgentTableRows(agents []workers.AgentContract, agentInstanceKeys []str
 			instanceKey := planStepInstanceKey(streamIndex, stepIndex)
 			runtimeEntry, found := lookup[instanceKey]
 			if !found {
-				// Fallback to canonical name for agents loaded without an instance key.
 				runtimeEntry, found = lookup[CanonicalAgentName(step.Agent)]
 			}
 			rowState := "-"
