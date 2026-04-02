@@ -88,6 +88,7 @@ func ParsePlanOutput(output string) (Plan, error) {
 
 const (
 	branchSetupAgentName    = "branch-setup"
+	branchMergerAgentName   = "branch-merger"
 	codeReviewerAgentName   = "code-reviewer"
 	plannerAgentName        = "planner"
 	generalPurposeAgentName = "general-purpose"
@@ -336,6 +337,9 @@ func (s *Supervisor) executeStream(ctx context.Context, streamIndex int, streamD
 			return err
 		}
 		if decision.Completed {
+			if _, err := s.runBranchMergerForStream(ctx, streamIndex, streamCtx, state); err != nil && s.Logger != nil {
+				s.Logger.LogProject("BRANCH_MERGE_ERROR", fmt.Sprintf("Failed to merge stream %d: %v", streamIndex, err))
+			}
 			return nil
 		}
 		if decision.NextTask == nil {
@@ -456,7 +460,7 @@ func availablePlanningAgents(agentMap map[string]data.AgentDefinition, configure
 	seen := make(map[string]struct{}, len(agentMap))
 
 	add := func(name string) {
-		if name == "" || name == plannerAgentName || name == branchSetupAgentName || name == generalPurposeAgentName {
+		if name == "" || name == plannerAgentName || name == branchSetupAgentName || name == branchMergerAgentName || name == generalPurposeAgentName {
 			return
 		}
 		if _, ok := agentMap[name]; !ok {
@@ -590,6 +594,10 @@ func branchSetupInstanceKey(streamIndex int) string {
 	return fmt.Sprintf("branch-setup:s%d", streamIndex)
 }
 
+func branchMergerInstanceKey(streamIndex int) string {
+	return fmt.Sprintf("branch-merger:s%d", streamIndex)
+}
+
 func plannerStepInstanceKey(streamIndex, plannerStep int) string {
 	return fmt.Sprintf("planner:s%d:p%d", streamIndex, plannerStep)
 }
@@ -692,6 +700,69 @@ func (s *Supervisor) runBranchSetupForStream(ctx context.Context, streamIndex in
 	state.executedAgents[instanceKey] = struct{}{}
 	state.agentStateMu.Unlock()
 	return branchName, output, nil
+}
+
+func (s *Supervisor) runBranchMergerForStream(ctx context.Context, streamIndex int, streamCtx *StreamContext, state *executionState) (string, error) {
+	def, ok := state.agentMap[branchMergerAgentName]
+	if !ok {
+		return "", fmt.Errorf("branch-merger agent definition missing")
+	}
+
+	instanceKey := branchMergerInstanceKey(streamIndex)
+	agentLock := getAgentLock(state, instanceKey)
+	agentLock.Lock()
+	defer agentLock.Unlock()
+
+	agentRec, err := s.ensureStreamAgentRecord(ctx, branchMergerAgentName, instanceKey, streamIndex, streamCtx.BranchName, state)
+	if err != nil {
+		return "", err
+	}
+
+	task := "Merge this stream branch back into main."
+	state.agentStateMu.RLock()
+	_, completedBeforeRun := state.completedBeforeRun[instanceKey]
+	_, executedThisRun := state.executedAgents[instanceKey]
+	state.agentStateMu.RUnlock()
+
+	if agentRec.State == "completed" && completedBeforeRun && !executedThisRun {
+		s.logAgentActivity(branchMergerAgentName, "reused completed output")
+		s.appendBranchMergerHistory(streamCtx, task, agentRec.Output)
+		return agentRec.Output, nil
+	}
+
+	prompt := s.buildBranchMergerPrompt(streamCtx, task, def.PromptContext.PreviousOutput)
+	output, err := s.runPromptedAgent(ctx, agentRec, branchMergerAgentName, task, prompt, def, state)
+	if err != nil {
+		return "", err
+	}
+
+	s.appendBranchMergerHistory(streamCtx, task, output)
+
+	state.agentStateMu.Lock()
+	state.agentStateMap[instanceKey] = refreshAgentCompletion(agentRec, output)
+	state.executedAgents[instanceKey] = struct{}{}
+	state.agentStateMu.Unlock()
+	return output, nil
+}
+
+func (s *Supervisor) appendBranchMergerHistory(streamCtx *StreamContext, task, output string) {
+	meta, cleanedOutput, parseErr := ParseAgentOutput(output)
+	if parseErr != nil {
+		meta = AgentOutputMeta{
+			Summary:          summarizeOutput(output),
+			CompletionStatus: "partial",
+		}
+		cleanedOutput = strings.TrimSpace(output)
+	}
+	if strings.TrimSpace(meta.BranchName) != "" {
+		streamCtx.BranchName = strings.TrimSpace(meta.BranchName)
+	}
+	streamCtx.ExecutionHistory = append(streamCtx.ExecutionHistory, ExecutedStep{
+		Agent:   branchMergerAgentName,
+		Task:    task,
+		Output:  cleanedOutput,
+		Summary: meta.Summary,
+	})
 }
 
 func (s *Supervisor) runPromptedAgent(ctx context.Context, agentRec data.Agent, agentName, task, prompt string, def data.AgentDefinition, state *executionState) (string, error) {
@@ -947,7 +1018,7 @@ func buildAgentTaskPrompt(agentName, task, previousOutput string, includePreviou
 	sections := []string{
 		prompt,
 		"End your response with a final JSON code block containing planner-facing metadata.",
-		"Use this schema: ```json\n{\"summary\":\"brief result summary\",\"branch_name\":\"optional branch name\",\"files_modified\":[\"optional/file\"],\"tests_run\":{\"passed\":0,\"failed\":0,\"skipped\":0,\"failures\":[]},\"issues\":[{\"type\":\"bug|security|style|performance\",\"severity\":\"critical|high|medium|low\",\"description\":\"issue summary\",\"location\":\"optional file:line\"}],\"recommendations\":[\"optional next consideration\"],\"completion_status\":\"full|partial|blocked\"}\n```",
+		"Use this schema: ```json\n{\"summary\":\"brief result summary\",\"branch_name\":\"optional branch name\",\"merge_status\":\"optional merge status\",\"files_modified\":[\"optional/file\"],\"tests_run\":{\"passed\":0,\"failed\":0,\"skipped\":0,\"failures\":[]},\"issues\":[{\"type\":\"bug|security|style|performance\",\"severity\":\"critical|high|medium|low\",\"description\":\"issue summary\",\"location\":\"optional file:line\"}],\"recommendations\":[\"optional next consideration\"],\"completion_status\":\"full|partial|blocked\"}\n```",
 		"Keep all human-readable details before the final JSON block.",
 	}
 
@@ -1013,6 +1084,36 @@ func (s *Supervisor) buildBranchSetupPrompt(streamIndex int, task, mainTask stri
 
 	if includePreviousOutput {
 		sections = append(sections, "Previous context/output is not required for branch setup.")
+	}
+
+	return strings.Join(sections, "\n\n")
+}
+
+func (s *Supervisor) buildBranchMergerPrompt(streamCtx *StreamContext, task string, includePreviousOutput bool) string {
+	sections := []string{
+		fmt.Sprintf("Task: %s", task),
+		fmt.Sprintf("Stream id: %d", streamCtx.StreamID),
+		fmt.Sprintf("Project name: %s", strings.TrimSpace(s.ProjectName)),
+		fmt.Sprintf("Source branch: %s", strings.TrimSpace(streamCtx.BranchName)),
+		"Target branch: main",
+		fmt.Sprintf("Main task: %s", strings.TrimSpace(streamCtx.MainTask)),
+		fmt.Sprintf("Workplace: %s", strings.TrimSpace(s.Workplace)),
+		"Summarize what this stream completed before reporting the merge result.",
+		"End your response with a final JSON code block using the shared metadata schema and include merge_status.",
+	}
+
+	if len(streamCtx.ExecutionHistory) > 0 {
+		history := make([]string, 0, len(streamCtx.ExecutionHistory))
+		for index, step := range streamCtx.ExecutionHistory {
+			history = append(history, fmt.Sprintf("%d. [%s] %s => %s", index+1, step.Agent, step.Task, step.Summary))
+		}
+		sections = append(sections, "Execution history:\n"+strings.Join(history, "\n"))
+	}
+
+	if includePreviousOutput {
+		if lastStep := latestExecutedStep(streamCtx); lastStep != nil && strings.TrimSpace(lastStep.Output) != "" {
+			sections = append(sections, "Previous context/output:\n"+strings.TrimSpace(lastStep.Output))
+		}
 	}
 
 	return strings.Join(sections, "\n\n")

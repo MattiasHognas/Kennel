@@ -16,9 +16,14 @@ supervisor orchestrates work through an **iterative per-stream planning model**:
    initialise an isolated git branch.
 3. For each stream, the planner is **re-invoked iteratively** to decide the
    **single next step** (or mark the stream complete).
-4. Agents return **structured metadata** so the planner can make informed
+4. When a stream is complete, the supervisor invokes the configured
+   **branch-merger** agent as the final stream-scoped step to merge that branch
+   back into `main`. If the agent definition is missing, the supervisor records
+   that as a merge-finalization error but still preserves the completed stream
+   work.
+5. Agents return **structured metadata** so the planner can make informed
    decisions about what to do next.
-5. All state changes and activities are persisted to a local SQLite database
+6. All state changes and activities are persisted to a local SQLite database
    so runs can be resumed after a restart.
 
 ## Execution Flow
@@ -39,7 +44,8 @@ flowchart TD
         BranchSetup[Branch Setup Agent] --> |"branch_name"| PlannerDecision[Planner: Next Step?]
         PlannerDecision --> |"completed: false"| ExecuteTask[Execute Agent Task]
         ExecuteTask --> |"AgentOutputMeta"| PlannerDecision
-        PlannerDecision --> |"completed: true"| StreamDone([Stream Complete])
+        PlannerDecision --> |"completed: true"| BranchMerger[Branch Merger Agent]
+        BranchMerger --> StreamDone([Stream Complete])
     end
     
     Stream1 --> BranchSetup
@@ -124,6 +130,16 @@ sequenceDiagram
     end
 ```
 
+#### 4. Per-Stream Branch Merge
+
+When the planner returns `{"completed": true}`, the supervisor invokes the
+configured branch-merger agent for that stream before considering the stream
+finished. If that agent definition is missing, the supervisor surfaces a
+merge-finalization error instead of silently skipping the step. The
+branch-merger receives the stream branch, the target branch (`main`), and the
+stream execution history so it can report a merge result in structured
+metadata.
+
 The planner decision prompt includes:
 
 ```
@@ -179,12 +195,15 @@ Reference: [`PlanDecision` struct](internal/logic/supervisor.go#L42-L46)
 
 ### AgentOutputMeta (Worker Output)
 
-Every worker agent must end its response with a JSON metadata block:
+Every worker agent must end its response with a JSON metadata block. Fields such
+as `branch_name` and `merge_status` are optional; `merge_status` is primarily
+used by the branch-merger finalizer:
 
 ```json
 {
   "summary": "Created JokesController with GET /api/jokes endpoint",
   "branch_name": "feature/jokes-api",
+  "merge_status": "merged",
   "files_modified": ["Controllers/JokesController.cs", "Program.cs"],
   "tests_run": {
     "passed": 5,
