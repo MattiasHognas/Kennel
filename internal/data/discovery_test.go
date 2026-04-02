@@ -21,6 +21,10 @@ func TestLoadAgentDefinitions(t *testing.T) {
 			"name":"shared-language-server",
 			"command":"uvx",
 			"args":["python-mcp"]
+		},{
+			"transport":"sse",
+			"name":"shared-docs",
+			"url":"https://docs.example.test/sse"
 		}],
 		"permissions":{
 			"git":{
@@ -67,6 +71,11 @@ func TestLoadAgentDefinitions(t *testing.T) {
 			}
 		},
 		"mcpServers":[{
+			"transport":"stdio",
+			"name":"shared-language-server",
+			"command":"custom-uvx",
+			"args":["custom-python-mcp"]
+		},{
 			"transport":"stdio",
 			"name":"playwright",
 			"command":"npx",
@@ -117,7 +126,7 @@ func TestLoadAgentDefinitions(t *testing.T) {
 		t.Errorf("agent1 expected default previousOutput to be enabled")
 	}
 
-	if len(a1.MCPServers) != 1 || a1.MCPServers[0].Name != "shared-language-server" {
+	if len(a1.MCPServers) != 2 || a1.MCPServers[0].Name != "shared-language-server" || a1.MCPServers[1].Name != "shared-docs" {
 		t.Fatalf("agent1 expected inherited MCP server, got %#v", a1.MCPServers)
 	}
 
@@ -137,8 +146,20 @@ func TestLoadAgentDefinitions(t *testing.T) {
 		t.Errorf("agent2 expected unspecified acp permissions to inherit defaults: %#v", a2.Permissions.ACP)
 	}
 
-	if len(a2.MCPServers) != 1 || a2.MCPServers[0].Name != "playwright" {
-		t.Fatalf("agent2 expected overridden MCP server, got %#v", a2.MCPServers)
+	if len(a2.MCPServers) != 3 {
+		t.Fatalf("agent2 expected merged MCP servers, got %#v", a2.MCPServers)
+	}
+
+	if a2.MCPServers[0].Name != "shared-language-server" || a2.MCPServers[0].Command != "custom-uvx" || !slices.Equal(a2.MCPServers[0].Args, []string{"custom-python-mcp"}) {
+		t.Fatalf("agent2 expected first MCP server to override inherited shared-language-server, got %#v", a2.MCPServers[0])
+	}
+
+	if a2.MCPServers[1].Name != "shared-docs" || a2.MCPServers[1].URL != "https://docs.example.test/sse" {
+		t.Fatalf("agent2 expected second MCP server to inherit shared-docs, got %#v", a2.MCPServers[1])
+	}
+
+	if a2.MCPServers[2].Name != "playwright" {
+		t.Fatalf("agent2 expected appended playwright MCP server, got %#v", a2.MCPServers[2])
 	}
 }
 

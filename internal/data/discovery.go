@@ -100,13 +100,19 @@ func cloneAgentConfig(config agentConfigFile) agentConfigFile {
 		Permissions:   config.Permissions,
 	}
 
-	if len(config.MCPServers) == 0 {
-		return cloned
+	cloned.MCPServers = cloneMCPServers(config.MCPServers)
+
+	return cloned
+}
+
+func cloneMCPServers(servers []MCPServer) []MCPServer {
+	if len(servers) == 0 {
+		return nil
 	}
 
-	cloned.MCPServers = make([]MCPServer, 0, len(config.MCPServers))
-	for _, server := range config.MCPServers {
-		cloned.MCPServers = append(cloned.MCPServers, MCPServer{
+	cloned := make([]MCPServer, 0, len(servers))
+	for _, server := range servers {
+		cloned = append(cloned, MCPServer{
 			Transport: server.Transport,
 			Name:      server.Name,
 			Command:   server.Command,
@@ -131,6 +137,44 @@ func cloneStringMap(source map[string]string) map[string]string {
 	}
 
 	return cloned
+}
+
+func mergeMCPServers(inherited []MCPServer, overrides []MCPServer) []MCPServer {
+	if len(inherited) == 0 {
+		return cloneMCPServers(overrides)
+	}
+	if len(overrides) == 0 {
+		return cloneMCPServers(inherited)
+	}
+
+	overrideByName := make(map[string]MCPServer, len(overrides))
+	overrideOrder := make([]string, 0, len(overrides))
+	for _, server := range overrides {
+		if _, exists := overrideByName[server.Name]; !exists {
+			overrideOrder = append(overrideOrder, server.Name)
+		}
+		overrideByName[server.Name] = server
+	}
+
+	merged := make([]MCPServer, 0, len(inherited)+len(overrides))
+	for _, server := range inherited {
+		if override, exists := overrideByName[server.Name]; exists {
+			merged = append(merged, cloneMCPServers([]MCPServer{override})[0])
+			delete(overrideByName, server.Name)
+			continue
+		}
+		merged = append(merged, cloneMCPServers([]MCPServer{server})[0])
+	}
+
+	for _, name := range overrideOrder {
+		override, exists := overrideByName[name]
+		if !exists {
+			continue
+		}
+		merged = append(merged, cloneMCPServers([]MCPServer{override})[0])
+	}
+
+	return merged
 }
 
 func validateAgentConfig(agentName string, config agentConfigFile) error {
@@ -197,9 +241,11 @@ func LoadAgentDefinitions(rootDir string) ([]AgentDefinition, error) {
 		agentConfig := cloneAgentConfig(defaultConfig)
 		agentJSONPath := filepath.Join(agentPath, "agent.json")
 		if data, err := os.ReadFile(agentJSONPath); err == nil {
+			inheritedMCPServers := cloneMCPServers(agentConfig.MCPServers)
 			if err := json.Unmarshal(data, &agentConfig); err != nil {
 				return nil, fmt.Errorf("parse agent.json for %s: %w", agentName, err)
 			}
+			agentConfig.MCPServers = mergeMCPServers(inheritedMCPServers, agentConfig.MCPServers)
 			if err := validateAgentConfig(agentName, agentConfig); err != nil {
 				return nil, err
 			}
