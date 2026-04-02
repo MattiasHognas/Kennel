@@ -59,6 +59,9 @@ func BuildPlannerContext(mainTask string, lastStep *ExecutedStep, streamContext 
 		if strings.TrimSpace(streamContext.BranchName) != "" {
 			sections = append(sections, fmt.Sprintf("Stream branch: %s", strings.TrimSpace(streamContext.BranchName)))
 		}
+		if strings.TrimSpace(streamContext.WorktreePath) != "" {
+			sections = append(sections, fmt.Sprintf("Stream worktree: %s", strings.TrimSpace(streamContext.WorktreePath)))
+		}
 		if len(streamContext.ExecutionHistory) > 0 {
 			history := make([]string, 0, len(streamContext.ExecutionHistory))
 			for index, step := range streamContext.ExecutionHistory {

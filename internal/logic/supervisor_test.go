@@ -5,6 +5,7 @@ import (
 	repository "MattiasHognas/Kennel/internal/data"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -415,6 +416,107 @@ func TestRunPlanAllowsConcurrentInstancesOfSameAgentAcrossStreams(t *testing.T) 
 	}
 }
 
+func TestRunPlanUsesSeparateWorktreesPerStream(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "branch-merger", "frontend-developer")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super.Logger = nil
+
+	var (
+		mu                 sync.Mutex
+		workplacesByStream = map[int]map[string]struct{}{}
+	)
+
+	recordStreamWorkplace := func(streamID int, workplace string) {
+		t.Helper()
+
+		if workplace == project.Workplace {
+			t.Fatalf("stream %d workplace = project root %q, want separate worktree", streamID, workplace)
+		}
+		if _, err := os.Stat(filepath.Join(workplace, ".git")); err != nil {
+			t.Fatalf("stream %d workplace %q missing git metadata: %v", streamID, workplace, err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if workplacesByStream[streamID] == nil {
+			workplacesByStream[streamID] = map[string]struct{}{}
+		}
+		workplacesByStream[streamID][workplace] = struct{}{}
+	}
+
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		switch topic {
+		case "planner":
+			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
+				if strings.Contains(msg, `Create a JSON object containing a "streams" array.`) {
+					if workplace != project.Workplace {
+						t.Fatalf("initial planner workplace = %q, want %q", workplace, project.Workplace)
+					}
+					return `{"streams":[{"task":"Build UI stream"},{"task":"Build API stream"}]}`, nil
+				}
+				streamID := promptStreamID(t, msg)
+				recordStreamWorkplace(streamID, workplace)
+				if strings.Contains(msg, "Build UI stream") && !strings.Contains(msg, "Last agent: frontend-developer") {
+					return `{"completed":false,"reason":"Need implementation","next_task":{"agent":"frontend-developer","task":"Build UI"}}`, nil
+				}
+				if strings.Contains(msg, "Build API stream") && !strings.Contains(msg, "Last agent: frontend-developer") {
+					return `{"completed":false,"reason":"Need implementation","next_task":{"agent":"frontend-developer","task":"Build API"}}`, nil
+				}
+				return `{"completed":true,"reason":"Done"}`, nil
+			}}, nil
+		case "branch-setup":
+			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
+				streamID := promptStreamID(t, msg)
+				recordStreamWorkplace(streamID, workplace)
+				return "Branch ready\n\n```json\n{\"summary\":\"Branch ready\",\"branch_name\":\"stream\",\"completion_status\":\"full\"}\n```", nil
+			}}, nil
+		case "frontend-developer":
+			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
+				streamID := promptStreamID(t, msg)
+				recordStreamWorkplace(streamID, workplace)
+				return "Implemented work\n\n```json\n{\"summary\":\"Implemented work\",\"completion_status\":\"full\"}\n```", nil
+			}}, nil
+		case "branch-merger":
+			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
+				streamID := promptStreamID(t, msg)
+				recordStreamWorkplace(streamID, workplace)
+				return "Merged stream branch into main\n\n```json\n{\"summary\":\"Merged stream branch into main\",\"branch_name\":\"main\",\"merge_status\":\"merged\",\"completion_status\":\"full\"}\n```", nil
+			}}, nil
+		default:
+			t.Fatalf("unexpected ACP topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	if len(workplacesByStream) != 2 {
+		t.Fatalf("stream workplaces = %#v, want 2 streams", workplacesByStream)
+	}
+
+	var distinct []string
+	for streamID, streamWorkplaces := range workplacesByStream {
+		if len(streamWorkplaces) != 1 {
+			t.Fatalf("stream %d workplaces = %#v, want exactly one worktree path", streamID, streamWorkplaces)
+		}
+		for workplace := range streamWorkplaces {
+			distinct = append(distinct, workplace)
+			if _, err := os.Stat(workplace); !os.IsNotExist(err) {
+				t.Fatalf("stream %d worktree %q still exists after cleanup; stat err=%v", streamID, workplace, err)
+			}
+		}
+	}
+	if distinct[0] == distinct[1] {
+		t.Fatalf("distinct stream worktrees = %v, want separate paths", distinct)
+	}
+}
+
 func TestRunPlanSurfacesMissingBranchMergerDefinition(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
@@ -598,12 +700,52 @@ func newTestRepository(t *testing.T) *data.SQLiteRepository {
 func newTestProject(t *testing.T, repo *data.SQLiteRepository) data.Project {
 	t.Helper()
 
-	project, err := repo.CreateProject(context.Background(), "test-project", t.TempDir(), "build something")
+	workplace := t.TempDir()
+	initGitRepository(t, workplace)
+
+	project, err := repo.CreateProject(context.Background(), "test-project", workplace, "build something")
 	if err != nil {
 		t.Fatalf("CreateProject returned error: %v", err)
 	}
 
 	return project
+}
+
+func initGitRepository(t *testing.T, dir string) {
+	t.Helper()
+
+	runGitCommand(t, dir, "init", "-b", "main")
+	runGitCommand(t, dir, "config", "user.name", "Test User")
+	runGitCommand(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("test\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	runGitCommand(t, dir, "add", "README.md")
+	runGitCommand(t, dir, "commit", "-m", "initial commit")
+}
+
+func runGitCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(out))
+	}
+}
+
+func promptStreamID(t *testing.T, msg string) int {
+	t.Helper()
+
+	switch {
+	case strings.Contains(msg, "Stream id: 0"):
+		return 0
+	case strings.Contains(msg, "Stream id: 1"):
+		return 1
+	default:
+		t.Fatalf("prompt %q missing stream id", msg)
+		return -1
+	}
 }
 
 func newTestAgentsRoot(t *testing.T, agentNames ...string) string {

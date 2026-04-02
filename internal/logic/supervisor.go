@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -71,6 +72,7 @@ type StreamContext struct {
 	StreamID         int
 	MainTask         string
 	BranchName       string
+	WorktreePath     string
 	ExecutionHistory []ExecutedStep
 	PlannerOutputs   []string
 }
@@ -257,7 +259,7 @@ func (s *Supervisor) runInitialPlanner(ctx context.Context, instructions string,
 	}
 
 	prompt := buildInitialPlannerPrompt(instructions, planningAgents)
-	output, err := s.runPromptedAgent(ctx, plannerRec, plannerTask.Agent, plannerTask.Task, prompt, plannerDef, nil)
+	output, err := s.runPromptedAgent(ctx, plannerRec, plannerTask.Agent, plannerTask.Task, prompt, plannerDef, s.Workplace, nil)
 	if err != nil {
 		return StreamPlan{}, s.failAgentAndStop(ctx, plannerRec, 0, "planning_failed", err)
 	}
@@ -299,16 +301,18 @@ func (s *Supervisor) executeStream(ctx context.Context, streamIndex int, streamD
 		return err
 	}
 
+	streamCtx := &StreamContext{
+		StreamID:     streamIndex,
+		MainTask:     streamDef.Task,
+		WorktreePath: s.streamWorktreePath(streamIndex),
+	}
+	defer s.cleanupStreamWorktree(ctx, streamCtx)
+
 	branchName, setupOut, err := s.runBranchSetupForStream(ctx, streamIndex, streamDef.Task, state)
 	if err != nil {
 		return err
 	}
-
-	streamCtx := &StreamContext{
-		StreamID:   streamIndex,
-		MainTask:   streamDef.Task,
-		BranchName: branchName,
-	}
+	streamCtx.BranchName = branchName
 
 	setupMeta, cleanedSetupOut, parseErr := ParseAgentOutput(setupOut)
 	if parseErr == nil {
@@ -365,7 +369,7 @@ func (s *Supervisor) executeStream(ctx context.Context, streamIndex int, streamD
 		out, err := s.executeTask(ctx, executionTask{
 			PlanTask:    plannedTask,
 			InstanceKey: instanceKey,
-		}, taskPrompt, state)
+		}, taskPrompt, streamCtx.WorktreePath, state)
 		if err != nil {
 			return err
 		}
@@ -637,7 +641,7 @@ func (s *Supervisor) runPlannerDecision(ctx context.Context, streamCtx *StreamCo
 
 	task := "Decide the next single step for this stream."
 	prompt := buildPlannerDecisionPrompt(streamCtx, state.planningAgents)
-	output, err := s.runPromptedAgent(ctx, agentRec, plannerAgentName, task, prompt, plannerDef, state)
+	output, err := s.runPromptedAgent(ctx, agentRec, plannerAgentName, task, prompt, plannerDef, streamCtx.WorktreePath, state)
 	if err != nil {
 		return PlanDecision{}, fmt.Errorf("planner step failed for stream %d: %w", streamCtx.StreamID, err)
 	}
@@ -671,6 +675,10 @@ func (s *Supervisor) runBranchSetupForStream(ctx context.Context, streamIndex in
 	}
 
 	branchName := s.streamBranchName(streamIndex)
+	worktreePath, err := s.ensureStreamWorktree(ctx, streamIndex, branchName)
+	if err != nil {
+		return "", "", err
+	}
 	instanceKey := branchSetupInstanceKey(streamIndex)
 	agentRec, err := s.ensureStreamAgentRecord(ctx, branchSetupAgentName, instanceKey, streamIndex, branchName, state)
 	if err != nil {
@@ -678,8 +686,8 @@ func (s *Supervisor) runBranchSetupForStream(ctx context.Context, streamIndex in
 	}
 
 	task := "Initialize branch context for this stream."
-	prompt := s.buildBranchSetupPrompt(streamIndex, task, mainTask, def.PromptContext.PreviousOutput)
-	output, err := s.runPromptedAgent(ctx, agentRec, branchSetupAgentName, task, prompt, def, state)
+	prompt := s.buildBranchSetupPrompt(streamIndex, task, mainTask, worktreePath, def.PromptContext.PreviousOutput)
+	output, err := s.runPromptedAgent(ctx, agentRec, branchSetupAgentName, task, prompt, def, worktreePath, state)
 	if err != nil {
 		return "", "", err
 	}
@@ -731,7 +739,7 @@ func (s *Supervisor) runBranchMergerForStream(ctx context.Context, streamIndex i
 	}
 
 	prompt := s.buildBranchMergerPrompt(streamCtx, task, def.PromptContext.PreviousOutput)
-	output, err := s.runPromptedAgent(ctx, agentRec, branchMergerAgentName, task, prompt, def, state)
+	output, err := s.runPromptedAgent(ctx, agentRec, branchMergerAgentName, task, prompt, def, streamCtx.WorktreePath, state)
 	if err != nil {
 		return "", err
 	}
@@ -765,12 +773,12 @@ func (s *Supervisor) appendBranchMergerHistory(streamCtx *StreamContext, task, o
 	})
 }
 
-func (s *Supervisor) runPromptedAgent(ctx context.Context, agentRec data.Agent, agentName, task, prompt string, def data.AgentDefinition, state *executionState) (string, error) {
+func (s *Supervisor) runPromptedAgent(ctx context.Context, agentRec data.Agent, agentName, task, prompt string, def data.AgentDefinition, workplace string, state *executionState) (string, error) {
 	if err := s.markAgentRunning(ctx, agentRec, task); err != nil {
 		return "", err
 	}
 
-	wrapper, err := s.AcpFactory(ctx, def, s.EventBus, s.Workplace, agentName)
+	wrapper, err := s.AcpFactory(ctx, def, s.EventBus, firstNonEmpty(workplace, s.Workplace), agentName)
 	if err != nil {
 		if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
 			s.reportAgentError(agentName, "Failed to persist agent failure: %v", failErr)
@@ -885,7 +893,7 @@ func (s *Supervisor) executePlan(ctx context.Context, streams []executionStream,
 			currentPrompt := initialPrompt
 			for _, step := range stream {
 				var err error
-				currentPrompt, err = s.executeTask(gCtx, step, currentPrompt, state)
+				currentPrompt, err = s.executeTask(gCtx, step, currentPrompt, s.Workplace, state)
 				if err != nil {
 					return err
 				}
@@ -897,7 +905,7 @@ func (s *Supervisor) executePlan(ctx context.Context, streams []executionStream,
 	return g.Wait()
 }
 
-func (s *Supervisor) executeTask(ctx context.Context, step executionTask, currentPrompt string, state *executionState) (string, error) {
+func (s *Supervisor) executeTask(ctx context.Context, step executionTask, currentPrompt, workplace string, state *executionState) (string, error) {
 	agentLock := getAgentLock(state, step.InstanceKey)
 	agentLock.Lock()
 	defer agentLock.Unlock()
@@ -933,7 +941,7 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 	state.agentStateMap[step.InstanceKey] = agentRec
 	state.agentStateMu.Unlock()
 
-	wrapper, err := s.AcpFactory(ctx, def, s.EventBus, s.Workplace, step.Agent)
+	wrapper, err := s.AcpFactory(ctx, def, s.EventBus, firstNonEmpty(workplace, s.Workplace), step.Agent)
 	if err != nil {
 		if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
 			s.reportAgentError(step.Agent, "Failed to persist agent failure: %v", failErr)
@@ -1068,7 +1076,7 @@ func pathsMatch(left string, right string) bool {
 	return left == right
 }
 
-func (s *Supervisor) buildBranchSetupPrompt(streamIndex int, task, mainTask string, includePreviousOutput bool) string {
+func (s *Supervisor) buildBranchSetupPrompt(streamIndex int, task, mainTask, worktreePath string, includePreviousOutput bool) string {
 	branchName := s.streamBranchName(streamIndex)
 	sections := []string{
 		fmt.Sprintf("Task: %s", task),
@@ -1078,7 +1086,8 @@ func (s *Supervisor) buildBranchSetupPrompt(streamIndex int, task, mainTask stri
 		fmt.Sprintf("Run id: %s", branchRunID(s.Logger)),
 		fmt.Sprintf("Suggested branch name: %s", branchName),
 		fmt.Sprintf("Main task: %s", strings.TrimSpace(mainTask)),
-		fmt.Sprintf("Workplace: %s", strings.TrimSpace(s.Workplace)),
+		fmt.Sprintf("Repository root: %s", strings.TrimSpace(s.Workplace)),
+		fmt.Sprintf("Stream worktree: %s", strings.TrimSpace(worktreePath)),
 		"End your response with a final JSON code block using the shared metadata schema and include branch_name.",
 	}
 
@@ -1097,7 +1106,8 @@ func (s *Supervisor) buildBranchMergerPrompt(streamCtx *StreamContext, task stri
 		fmt.Sprintf("Source branch: %s", strings.TrimSpace(streamCtx.BranchName)),
 		"Target branch: main",
 		fmt.Sprintf("Main task: %s", strings.TrimSpace(streamCtx.MainTask)),
-		fmt.Sprintf("Workplace: %s", strings.TrimSpace(s.Workplace)),
+		fmt.Sprintf("Repository root: %s", strings.TrimSpace(s.Workplace)),
+		fmt.Sprintf("Stream worktree: %s", strings.TrimSpace(streamCtx.WorktreePath)),
 		"Summarize what this stream completed before reporting the merge result.",
 		"End your response with a final JSON code block using the shared metadata schema and include merge_status.",
 	}
@@ -1126,6 +1136,85 @@ func (s *Supervisor) streamBranchName(streamIndex int) string {
 		return fmt.Sprintf("%s/stream-%d", projectSlug, streamIndex)
 	}
 	return fmt.Sprintf("%s/%s/stream-%d", projectSlug, runID, streamIndex)
+}
+
+func (s *Supervisor) streamWorktreePath(streamIndex int) string {
+	resolvedWorkplace, err := filepath.Abs(strings.TrimSpace(s.Workplace))
+	if err != nil {
+		s.reportProjectError("Failed to resolve workplace path for stream worktree: %v", err)
+		resolvedWorkplace = filepath.Clean(strings.TrimSpace(s.Workplace))
+	}
+
+	segments := []string{
+		filepath.Dir(resolvedWorkplace),
+		".kennel-worktrees",
+		branchProjectSlug(s.ProjectName),
+	}
+	if runID := branchRunID(s.Logger); runID != "" {
+		segments = append(segments, runID)
+	}
+	segments = append(segments, fmt.Sprintf("stream-%d", streamIndex))
+	return filepath.Join(segments...)
+}
+
+func (s *Supervisor) ensureStreamWorktree(ctx context.Context, streamIndex int, branchName string) (string, error) {
+	repoRoot, err := filepath.Abs(strings.TrimSpace(s.Workplace))
+	if err != nil {
+		return "", fmt.Errorf("resolve workplace path: %w", err)
+	}
+
+	worktreePath := s.streamWorktreePath(streamIndex)
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
+		return "", fmt.Errorf("create worktree parent for stream %d: %w", streamIndex, err)
+	}
+
+	exists, err := existingWorktreeAtPath(ctx, worktreePath)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		return worktreePath, nil
+	}
+
+	branchExists, err := gitBranchExists(ctx, repoRoot, branchName)
+	if err != nil {
+		return "", fmt.Errorf("check branch %s for stream %d worktree: %w", branchName, streamIndex, err)
+	}
+	if branchExists {
+		if _, err := runGit(ctx, repoRoot, "worktree", "add", "--force", worktreePath, branchName); err != nil {
+			return "", fmt.Errorf("attach worktree for stream %d branch %s: %w", streamIndex, branchName, err)
+		}
+		return worktreePath, nil
+	}
+	if _, err := runGit(ctx, repoRoot, "worktree", "add", "--force", "-b", branchName, worktreePath, "main"); err != nil {
+		return "", fmt.Errorf("create worktree for stream %d branch %s: %w", streamIndex, branchName, err)
+	}
+
+	return worktreePath, nil
+}
+
+func (s *Supervisor) cleanupStreamWorktree(ctx context.Context, streamCtx *StreamContext) {
+	if streamCtx == nil || strings.TrimSpace(streamCtx.WorktreePath) == "" {
+		return
+	}
+
+	repoRoot, err := filepath.Abs(strings.TrimSpace(s.Workplace))
+	if err != nil {
+		s.reportProjectError("Failed to resolve worktree cleanup root: %v", err)
+		return
+	}
+
+	if _, statErr := os.Stat(streamCtx.WorktreePath); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return
+		}
+		s.reportProjectError("Failed to stat worktree %s before cleanup: %v", streamCtx.WorktreePath, statErr)
+		return
+	}
+
+	if _, err := runGit(ctx, repoRoot, "worktree", "remove", "--force", streamCtx.WorktreePath); err != nil {
+		s.reportProjectError("Failed to remove stream %d worktree %s: %v", streamCtx.StreamID, streamCtx.WorktreePath, err)
+	}
 }
 
 func branchProjectSlug(projectName string) string {
@@ -1165,6 +1254,68 @@ func sanitizePromptSegment(value string) string {
 	}
 
 	return strings.Trim(builder.String(), "-")
+}
+
+func existingWorktreeAtPath(ctx context.Context, worktreePath string) (bool, error) {
+	info, err := os.Stat(worktreePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat worktree path %s: %w", worktreePath, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("worktree path %s exists and is not a directory", worktreePath)
+	}
+
+	entries, err := os.ReadDir(worktreePath)
+	if err != nil {
+		return false, fmt.Errorf("read worktree path %s: %w", worktreePath, err)
+	}
+	if len(entries) == 0 {
+		if err := os.Remove(worktreePath); err != nil {
+			return false, fmt.Errorf("remove empty worktree path %s: %w", worktreePath, err)
+		}
+		return false, nil
+	}
+
+	out, err := runGit(ctx, worktreePath, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return false, fmt.Errorf("worktree path %s already exists and is not a git worktree: %w", worktreePath, err)
+	}
+	if !pathsMatch(strings.TrimSpace(out), worktreePath) {
+		return false, fmt.Errorf("worktree path %s resolves to different git root %s", worktreePath, strings.TrimSpace(out))
+	}
+	return true, nil
+}
+
+func gitBranchExists(ctx context.Context, dir string, branchName string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
+	if cmdErr := cmd.Run(); cmdErr == nil {
+		return true, nil
+	} else if exitErr, ok := cmdErr.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return false, nil
+	} else {
+		return false, fmt.Errorf("check branch %s: %w", branchName, cmdErr)
+	}
+}
+
+func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Supervisor) completeAgent(ctx context.Context, agent data.Agent, output string) error {
