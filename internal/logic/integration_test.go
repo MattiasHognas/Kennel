@@ -21,6 +21,8 @@ type integrationModelOptions struct {
 	supervisorRunner  SupervisorRunner
 }
 
+const maxCmdDrainSteps = 12
+
 func TestKeyboardNavigationSwitchesFocusedTables(t *testing.T) {
 	repo := newTestRepository(t)
 	storedProject, runtimeProject := newStoredProjectForModel(t, repo, "Navigation Project", "frontend-developer")
@@ -456,7 +458,7 @@ func sendKeyAndDrain(t *testing.T, m *Model, key tea.Key) {
 	t.Helper()
 
 	cmd := sendKey(t, m, key)
-	for step := 0; step < 12 && cmd != nil; step++ {
+	for step := 0; step < maxCmdDrainSteps && cmd != nil; step++ {
 		msg := runCmdWithTimeout(t, cmd, 2*time.Second)
 		batch, ok := msg.(tea.BatchMsg)
 		if ok {
@@ -531,7 +533,7 @@ func planningSupervisorRunner(t *testing.T, repo *data.SQLiteRepository, storedP
 		if err := repo.UpdateAgentState(ctx, planner.ID, workers.Completed.String()); err != nil {
 			return err
 		}
-		if _, err := repo.NewActivity(ctx, storedProject.ID, nullAgentID(planner.ID), "planner: completed"); err != nil {
+		if _, err := repo.NewActivity(ctx, storedProject.ID, nullAgentID(planner.ID), completedActivityText("planner")); err != nil {
 			return err
 		}
 		supervisor.EventBus.Publish(data.SupervisorTopic, data.Event{Payload: data.PlanUpdateEvent{Plan: planJSON}})
@@ -552,7 +554,7 @@ func planningSupervisorRunner(t *testing.T, repo *data.SQLiteRepository, storedP
 		if err := repo.UpdateAgentState(ctx, branchSetup.ID, workers.Completed.String()); err != nil {
 			return err
 		}
-		if _, err := repo.NewActivity(ctx, storedProject.ID, nullAgentID(branchSetup.ID), "branch-setup: completed"); err != nil {
+		if _, err := repo.NewActivity(ctx, storedProject.ID, nullAgentID(branchSetup.ID), completedActivityText("branch-setup")); err != nil {
 			return err
 		}
 		supervisor.EventBus.Publish(data.SupervisorTopic, data.Event{Payload: data.SupervisorSyncEvent{
@@ -573,7 +575,7 @@ func planningSupervisorRunner(t *testing.T, repo *data.SQLiteRepository, storedP
 		if err := repo.UpdateAgentState(ctx, frontendID, workers.Completed.String()); err != nil {
 			return err
 		}
-		if _, err := repo.NewActivity(ctx, storedProject.ID, nullAgentID(frontendID), "frontend-developer: completed"); err != nil {
+		if _, err := repo.NewActivity(ctx, storedProject.ID, nullAgentID(frontendID), completedActivityText("frontend-developer")); err != nil {
 			return err
 		}
 		supervisor.EventBus.Publish(data.SupervisorTopic, data.Event{Payload: data.SupervisorSyncEvent{
@@ -593,7 +595,7 @@ func planningSupervisorRunner(t *testing.T, repo *data.SQLiteRepository, storedP
 		if err := repo.UpdateAgentState(ctx, branchMerger.ID, workers.Completed.String()); err != nil {
 			return err
 		}
-		if _, err := repo.NewActivity(ctx, storedProject.ID, nullAgentID(branchMerger.ID), "branch-merger: completed"); err != nil {
+		if _, err := repo.NewActivity(ctx, storedProject.ID, nullAgentID(branchMerger.ID), completedActivityText("branch-merger")); err != nil {
 			return err
 		}
 		supervisor.EventBus.Publish(data.SupervisorTopic, data.Event{Payload: data.SupervisorSyncEvent{
@@ -688,4 +690,8 @@ func waitForAdvance(ctx context.Context, advance <-chan struct{}) error {
 
 func nullAgentID(agentID int64) sql.NullInt64 {
 	return sql.NullInt64{Int64: agentID, Valid: agentID > 0}
+}
+
+func completedActivityText(agentName string) string {
+	return agentName + ": completed"
 }
