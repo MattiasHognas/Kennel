@@ -87,16 +87,25 @@ func TestLoadAgentDefinitions(t *testing.T) {
 	agent3Dir := filepath.Join(agentsDir, "agent3")
 	os.MkdirAll(agent3Dir, 0755)
 
+	// agent 4: agent.json without mcpServers should still inherit defaults
+	agent4Dir := filepath.Join(agentsDir, "agent4")
+	os.MkdirAll(agent4Dir, 0755)
+	os.WriteFile(filepath.Join(agent4Dir, "instructions.md"), []byte(`test instructions`), 0644)
+	os.WriteFile(filepath.Join(agent4Dir, "agent.json"), []byte(`{
+		"binary":"partial-copilot",
+		"promptContext":{"previousOutput":false}
+	}`), 0644)
+
 	defs, err := LoadAgentDefinitions(tmp)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(defs) != 2 {
-		t.Fatalf("expected 2 agents, got %d", len(defs))
+	if len(defs) != 3 {
+		t.Fatalf("expected 3 agents, got %d", len(defs))
 	}
 
-	var a1, a2 *AgentDefinition
+	var a1, a2, a4 *AgentDefinition
 	for i := range defs {
 		if defs[i].Name == "agent1" {
 			a1 = &defs[i]
@@ -104,9 +113,12 @@ func TestLoadAgentDefinitions(t *testing.T) {
 		if defs[i].Name == "agent2" {
 			a2 = &defs[i]
 		}
+		if defs[i].Name == "agent4" {
+			a4 = &defs[i]
+		}
 	}
 
-	if a1 == nil || a2 == nil {
+	if a1 == nil || a2 == nil || a4 == nil {
 		t.Fatalf("missing expected agents")
 	}
 
@@ -128,6 +140,18 @@ func TestLoadAgentDefinitions(t *testing.T) {
 
 	if len(a1.MCPServers) != 2 || a1.MCPServers[0].Name != "shared-language-server" || a1.MCPServers[1].Name != "shared-docs" {
 		t.Fatalf("agent1 expected inherited MCP server, got %#v", a1.MCPServers)
+	}
+
+	if a4.LaunchConfig.Binary != "partial-copilot" {
+		t.Errorf("agent4 expected binary override to be applied, got %q", a4.LaunchConfig.Binary)
+	}
+
+	if a4.PromptContext.PreviousOutput {
+		t.Errorf("agent4 expected previousOutput override to be disabled")
+	}
+
+	if len(a4.MCPServers) != 2 || a4.MCPServers[0].Name != "shared-language-server" || a4.MCPServers[1].Name != "shared-docs" {
+		t.Fatalf("agent4 expected inherited MCP servers when agent.json omits mcpServers, got %#v", a4.MCPServers)
 	}
 
 	if a2.PromptContext.PreviousOutput {
