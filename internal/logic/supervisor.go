@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -1198,6 +1199,9 @@ func (s *Supervisor) cleanupStreamWorktree(ctx context.Context, streamCtx *Strea
 		return
 	}
 
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+
 	repoRoot, err := filepath.Abs(strings.TrimSpace(s.Workplace))
 	if err != nil {
 		s.reportProjectError("Failed to resolve worktree cleanup root: %v", err)
@@ -1212,7 +1216,7 @@ func (s *Supervisor) cleanupStreamWorktree(ctx context.Context, streamCtx *Strea
 		return
 	}
 
-	if _, err := runGit(ctx, repoRoot, "worktree", "remove", "--force", streamCtx.WorktreePath); err != nil {
+	if _, err := runGit(cleanupCtx, repoRoot, "worktree", "remove", "--force", streamCtx.WorktreePath); err != nil {
 		s.reportProjectError("Failed to remove stream %d worktree %s: %v", streamCtx.StreamID, streamCtx.WorktreePath, err)
 	}
 }

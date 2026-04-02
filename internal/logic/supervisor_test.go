@@ -517,6 +517,34 @@ func TestRunPlanUsesSeparateWorktreesPerStream(t *testing.T) {
 	}
 }
 
+func TestCleanupStreamWorktreeUsesDetachedContext(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	eb := data.NewEventBus()
+	super := NewSupervisor(repo, eb, t.TempDir(), project.ID, project.Name, project.Workplace)
+	super.Logger = nil
+
+	worktreePath, err := super.ensureStreamWorktree(context.Background(), 0, "stream-0")
+	if err != nil {
+		t.Fatalf("ensureStreamWorktree returned error: %v", err)
+	}
+	if _, err := os.Stat(worktreePath); err != nil {
+		t.Fatalf("worktree %q missing before cleanup: %v", worktreePath, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	super.cleanupStreamWorktree(ctx, &StreamContext{
+		StreamID:     0,
+		WorktreePath: worktreePath,
+	})
+
+	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
+		t.Fatalf("worktree %q still exists after cleanup with cancelled context; stat err=%v", worktreePath, err)
+	}
+}
+
 func TestRunPlanSurfacesMissingBranchMergerDefinition(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
