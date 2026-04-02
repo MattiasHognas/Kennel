@@ -676,16 +676,21 @@ func (s *Supervisor) runBranchSetupForStream(ctx context.Context, streamIndex in
 		return "", "", err
 	}
 
+	meta, _, parseErr := ParseAgentOutput(output)
+	if parseErr == nil {
+		if parsedBranchName := strings.TrimSpace(meta.BranchName); parsedBranchName != "" && parsedBranchName != branchName {
+			branchName = parsedBranchName
+			agentRec, err = s.ensureStreamAgentRecord(ctx, branchSetupAgentName, instanceKey, streamIndex, branchName, state)
+			if err != nil {
+				return "", "", err
+			}
+		}
+	}
+
 	state.agentStateMu.Lock()
 	state.agentStateMap[instanceKey] = refreshAgentCompletion(agentRec, output)
 	state.executedAgents[instanceKey] = struct{}{}
 	state.agentStateMu.Unlock()
-
-	meta, _, parseErr := ParseAgentOutput(output)
-	if parseErr == nil && strings.TrimSpace(meta.BranchName) != "" {
-		branchName = meta.BranchName
-	}
-
 	return branchName, output, nil
 }
 
