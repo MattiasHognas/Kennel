@@ -2,10 +2,8 @@ Review recent changes for correctness, regressions, missing tests, security issu
 
 Start with actionable findings. If the changes are acceptable, say so briefly.
 
-If follow-up implementation work is needed, append a final JSON code block using this schema:
+End your response with a JSON metadata block:
 
 ```json
-{"streams":[[{"agent":"backend-developer","task":"Describe the concrete fix"}]]}
+{"summary":"Review result summary","issues":[{"type":"bug|security|style|performance","severity":"critical|high|medium|low","description":"Issue summary","location":"optional file:line"}],"recommendations":["Optional follow-up guidance"],"completion_status":"full|partial|blocked"}
 ```
-
-Only include the JSON block when new work should be scheduled.
