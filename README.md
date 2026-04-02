@@ -455,7 +455,9 @@ expanded and collapsed states.
 
 Each `agent.json` can override `binary`, `args`, and `env` independently from
 `agents/default.json`, so one agent can use a different ACP-compatible runtime
-without affecting the rest.
+without affecting the rest. `mcpServers` are inherited from `agents/default.json`
+and then merged by `name`: matching names override inherited entries, new names
+are appended, and omitting `mcpServers` keeps the inherited list unchanged.
 
 ### Agent configuration schema
 
@@ -522,9 +524,14 @@ previous agent's output in the next task prompt.
 
 `mcpServers` supports these transports:
 
-- `stdio`: requires `name` and `command`; optional `args` and `env`
+- `stdio`: requires `name` and a single executable `command`; optional `args`
+  and `env`
 - `http`: requires `name` and `url`; optional `headers`
 - `sse`: requires `name` and `url`; optional `headers`
+
+For `stdio` servers, use `command` for the executable and `args` for the rest of
+the command line, for example `"command": "npx"` with
+`"args": ["@playwright/mcp@latest"]`.
 
 ### Example: isolate the tester
 
