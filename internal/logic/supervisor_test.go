@@ -50,17 +50,18 @@ func (r *trackingRepo) CheckpointSupervisorRun(ctx context.Context, projectID in
 func TestRunPlanIterativelyExecutesSingleNextSteps(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
-	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "branch-merger", "frontend-developer")
 	eb := data.NewEventBus()
 	tracking := &trackingRepo{SQLiteRepository: repo}
 	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
 
 	var (
-		topics              []string
-		branchSetupMessages []string
-		plannerMessages     []string
-		frontendMessages    []string
-		plannerStepCount    int
+		topics               []string
+		branchSetupMessages  []string
+		branchMergerMessages []string
+		plannerMessages      []string
+		frontendMessages     []string
+		plannerStepCount     int
 	)
 
 	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
@@ -103,6 +104,11 @@ func TestRunPlanIterativelyExecutesSingleNextSteps(t *testing.T) {
 				messages: &frontendMessages,
 				response: "Implemented UI\n\n```json\n{\"summary\":\"UI implemented\",\"files_modified\":[\"ui.go\"],\"completion_status\":\"full\"}\n```",
 			}, nil
+		case "branch-merger":
+			return &stubACPClient{
+				messages: &branchMergerMessages,
+				response: "Merged stream branch into main\n\n```json\n{\"summary\":\"Merged stream branch into main\",\"branch_name\":\"main\",\"merge_status\":\"merged\",\"completion_status\":\"full\"}\n```",
+			}, nil
 		default:
 			t.Fatalf("unexpected ACP topic %q", topic)
 			return nil, nil
@@ -114,8 +120,8 @@ func TestRunPlanIterativelyExecutesSingleNextSteps(t *testing.T) {
 		t.Fatalf("RunPlan returned error: %v", err)
 	}
 
-	if got := strings.Join(topics, ","); got != "planner,branch-setup,planner,frontend-developer,planner" {
-		t.Fatalf("ACP topics = %v, want planner,branch-setup,planner,frontend-developer,planner", topics)
+	if got := strings.Join(topics, ","); got != "planner,branch-setup,planner,frontend-developer,planner,branch-merger" {
+		t.Fatalf("ACP topics = %v, want planner,branch-setup,planner,frontend-developer,planner,branch-merger", topics)
 	}
 	if len(branchSetupMessages) != 1 {
 		t.Fatalf("branch setup messages = %v, want one", branchSetupMessages)
@@ -132,6 +138,15 @@ func TestRunPlanIterativelyExecutesSingleNextSteps(t *testing.T) {
 	if !strings.Contains(frontendMessages[0], "Last agent: branch-setup") {
 		t.Fatalf("frontend prompt = %q, want branch setup context", frontendMessages[0])
 	}
+	if len(branchMergerMessages) != 1 {
+		t.Fatalf("branch merger messages = %v, want one", branchMergerMessages)
+	}
+	if !strings.Contains(branchMergerMessages[0], "Source branch: test-project/run/stream-0") {
+		t.Fatalf("branch merger prompt = %q, want source branch", branchMergerMessages[0])
+	}
+	if !strings.Contains(branchMergerMessages[0], "Execution history:\n1. [branch-setup] Initialize branch context for this stream. => Branch ready\n2. [frontend-developer] Build UI => UI implemented") {
+		t.Fatalf("branch merger prompt = %q, want execution history", branchMergerMessages[0])
+	}
 
 	stored, err := repo.ReadProject(context.Background(), project.ID)
 	if err != nil {
@@ -141,6 +156,7 @@ func TestRunPlanIterativelyExecutesSingleNextSteps(t *testing.T) {
 	assertAgentState(t, stored.Agents, "planner", "completed")
 	assertAgentState(t, stored.Agents, "branch-setup", "completed")
 	assertAgentState(t, stored.Agents, "frontend-developer", "completed")
+	assertAgentState(t, stored.Agents, "branch-merger", "completed")
 }
 
 func TestRunPlanResolvesPlannerAgentNameVariants(t *testing.T) {
@@ -397,6 +413,103 @@ func TestRunPlanAllowsConcurrentInstancesOfSameAgentAcrossStreams(t *testing.T) 
 	if completedCount != 2 {
 		t.Fatalf("completed frontend-developer agent records = %d, want 2", completedCount)
 	}
+}
+
+func TestRunPlanSkipsBranchMergerWhenAgentDefinitionMissing(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super.Logger = nil
+
+	var topics []string
+	var plannerStepCount int
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		topics = append(topics, topic)
+		switch topic {
+		case "planner":
+			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
+				if strings.Contains(msg, `Create a JSON object containing a "streams" array.`) {
+					return `{"streams":[{"task":"Build the UI stream"}]}`, nil
+				}
+				plannerStepCount++
+				if plannerStepCount == 1 {
+					return `{"completed":false,"reason":"Need implementation","next_task":{"agent":"frontend-developer","task":"Build UI"}}`, nil
+				}
+				return `{"completed":true,"reason":"Done"}`, nil
+			}}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "Branch ready\n\n```json\n{\"summary\":\"Branch ready\",\"branch_name\":\"stream-0\",\"completion_status\":\"full\"}\n```"}, nil
+		case "frontend-developer":
+			return &stubACPClient{response: "Implemented UI\n\n```json\n{\"summary\":\"UI implemented\",\"completion_status\":\"full\"}\n```"}, nil
+		default:
+			t.Fatalf("unexpected topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	if strings.Join(topics, ",") != "planner,branch-setup,planner,frontend-developer,planner" {
+		t.Fatalf("ACP topics = %v, want no branch-merger execution", topics)
+	}
+}
+
+func TestRunPlanToleratesBranchMergerFailure(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	agentsRoot := newTestAgentsRoot(t, "branch-setup", "branch-merger", "frontend-developer")
+	eb := data.NewEventBus()
+	tracking := &trackingRepo{SQLiteRepository: repo}
+	super := NewSupervisor(tracking, eb, agentsRoot, project.ID, project.Name, project.Workplace)
+	super.Logger = nil
+
+	var topics []string
+	var plannerStepCount int
+	super.AcpFactory = func(ctx context.Context, definition data.AgentDefinition, eb *data.EventBus, workplace string, topic string) (ACPClient, error) {
+		topics = append(topics, topic)
+		switch topic {
+		case "planner":
+			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
+				if strings.Contains(msg, `Create a JSON object containing a "streams" array.`) {
+					return `{"streams":[{"task":"Build the UI stream"}]}`, nil
+				}
+				plannerStepCount++
+				if plannerStepCount == 1 {
+					return `{"completed":false,"reason":"Need implementation","next_task":{"agent":"frontend-developer","task":"Build UI"}}`, nil
+				}
+				return `{"completed":true,"reason":"Done"}`, nil
+			}}, nil
+		case "branch-setup":
+			return &stubACPClient{response: "Branch ready\n\n```json\n{\"summary\":\"Branch ready\",\"branch_name\":\"stream-0\",\"completion_status\":\"full\"}\n```"}, nil
+		case "frontend-developer":
+			return &stubACPClient{response: "Implemented UI\n\n```json\n{\"summary\":\"UI implemented\",\"completion_status\":\"full\"}\n```"}, nil
+		case "branch-merger":
+			return &stubACPClient{err: context.DeadlineExceeded}, nil
+		default:
+			t.Fatalf("unexpected topic %q", topic)
+			return nil, nil
+		}
+	}
+
+	if err := super.RunPlan(context.Background(), "ship it", []string{"frontend-developer"}); err != nil {
+		t.Fatalf("RunPlan returned error: %v", err)
+	}
+
+	if strings.Join(topics, ",") != "planner,branch-setup,planner,frontend-developer,planner,branch-merger" {
+		t.Fatalf("ACP topics = %v, want branch-merger execution", topics)
+	}
+
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+
+	assertAgentState(t, stored.Agents, "branch-merger", "failed")
 }
 
 func newTestRepository(t *testing.T) *data.SQLiteRepository {

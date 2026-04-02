@@ -10,6 +10,7 @@ import (
 type AgentOutputMeta struct {
 	Summary          string       `json:"summary"`
 	BranchName       string       `json:"branch_name,omitempty"`
+	MergeStatus      string       `json:"merge_status,omitempty"`
 	FilesModified    []string     `json:"files_modified,omitempty"`
 	TestsRun         *TestResults `json:"tests_run,omitempty"`
 	Issues           []Issue      `json:"issues,omitempty"`
@@ -119,6 +120,7 @@ func looksLikeAgentOutputMeta(meta AgentOutputMeta) bool {
 	return strings.TrimSpace(meta.Summary) != "" ||
 		strings.TrimSpace(meta.CompletionStatus) != "" ||
 		strings.TrimSpace(meta.BranchName) != "" ||
+		strings.TrimSpace(meta.MergeStatus) != "" ||
 		len(meta.FilesModified) > 0 ||
 		meta.TestsRun != nil ||
 		len(meta.Issues) > 0 ||
