@@ -696,6 +696,9 @@ func (s *Supervisor) runBranchSetupForStream(ctx context.Context, streamIndex in
 	meta, _, parseErr := ParseAgentOutput(output)
 	if parseErr == nil {
 		if parsedBranchName := strings.TrimSpace(meta.BranchName); parsedBranchName != "" && parsedBranchName != branchName {
+			if err := s.reconcileBranchSetupWorktree(ctx, worktreePath, branchName, parsedBranchName); err != nil {
+				return "", "", err
+			}
 			branchName = parsedBranchName
 			agentRec, err = s.ensureStreamAgentRecord(ctx, branchSetupAgentName, instanceKey, streamIndex, branchName, state)
 			if err != nil {
@@ -740,7 +743,7 @@ func (s *Supervisor) runBranchMergerForStream(ctx context.Context, streamIndex i
 	}
 
 	prompt := s.buildBranchMergerPrompt(streamCtx, task, def.PromptContext.PreviousOutput)
-	output, err := s.runPromptedAgent(ctx, agentRec, branchMergerAgentName, task, prompt, def, streamCtx.WorktreePath, state)
+	output, err := s.runPromptedAgent(ctx, agentRec, branchMergerAgentName, task, prompt, def, s.Workplace, state)
 	if err != nil {
 		return "", err
 	}
@@ -1107,8 +1110,8 @@ func (s *Supervisor) buildBranchMergerPrompt(streamCtx *StreamContext, task stri
 		fmt.Sprintf("Source branch: %s", strings.TrimSpace(streamCtx.BranchName)),
 		"Target branch: main",
 		fmt.Sprintf("Main task: %s", strings.TrimSpace(streamCtx.MainTask)),
-		fmt.Sprintf("Repository root: %s", strings.TrimSpace(s.Workplace)),
-		fmt.Sprintf("Stream worktree: %s", strings.TrimSpace(streamCtx.WorktreePath)),
+		fmt.Sprintf("Repository root (merge workspace): %s", strings.TrimSpace(s.Workplace)),
+		fmt.Sprintf("Source branch worktree: %s", strings.TrimSpace(streamCtx.WorktreePath)),
 		"Summarize what this stream completed before reporting the merge result.",
 		"End your response with a final JSON code block using the shared metadata schema and include merge_status.",
 	}
@@ -1174,24 +1177,90 @@ func (s *Supervisor) ensureStreamWorktree(ctx context.Context, streamIndex int, 
 		return "", err
 	}
 	if exists {
-		return worktreePath, nil
-	}
-
-	branchExists, err := gitBranchExists(ctx, repoRoot, branchName)
-	if err != nil {
-		return "", fmt.Errorf("check branch %s for stream %d worktree: %w", branchName, streamIndex, err)
-	}
-	if branchExists {
-		if _, err := runGit(ctx, repoRoot, "worktree", "add", "--force", worktreePath, branchName); err != nil {
-			return "", fmt.Errorf("attach worktree for stream %d branch %s: %w", streamIndex, branchName, err)
+		currentBranch, err := gitCurrentBranch(ctx, worktreePath)
+		if err != nil {
+			return "", fmt.Errorf("inspect branch for stream %d worktree %s: %w", streamIndex, worktreePath, err)
+		}
+		if strings.TrimSpace(currentBranch) != strings.TrimSpace(branchName) {
+			if err := s.recreateStreamWorktree(ctx, repoRoot, worktreePath, branchName, streamIndex); err != nil {
+				return "", err
+			}
 		}
 		return worktreePath, nil
 	}
+
+	if err := s.attachStreamWorktree(ctx, repoRoot, worktreePath, branchName, streamIndex); err != nil {
+		return "", err
+	}
+	return worktreePath, nil
+}
+
+func (s *Supervisor) attachStreamWorktree(ctx context.Context, repoRoot, worktreePath, branchName string, streamIndex int) error {
+	branchExists, err := gitBranchExists(ctx, repoRoot, branchName)
+	if err != nil {
+		return fmt.Errorf("check branch %s for stream %d worktree: %w", branchName, streamIndex, err)
+	}
+	if branchExists {
+		if _, err := runGit(ctx, repoRoot, "worktree", "add", "--force", worktreePath, branchName); err != nil {
+			return fmt.Errorf("attach worktree for stream %d branch %s: %w", streamIndex, branchName, err)
+		}
+		return nil
+	}
 	if _, err := runGit(ctx, repoRoot, "worktree", "add", "--force", "-b", branchName, worktreePath, "main"); err != nil {
-		return "", fmt.Errorf("create worktree for stream %d branch %s: %w", streamIndex, branchName, err)
+		return fmt.Errorf("create worktree for stream %d branch %s: %w", streamIndex, branchName, err)
+	}
+	return nil
+}
+
+func (s *Supervisor) recreateStreamWorktree(ctx context.Context, repoRoot, worktreePath, branchName string, streamIndex int) error {
+	if _, err := runGit(ctx, repoRoot, "worktree", "remove", "--force", worktreePath); err != nil {
+		return fmt.Errorf("remove stale worktree for stream %d path %s: %w", streamIndex, worktreePath, err)
+	}
+	return s.attachStreamWorktree(ctx, repoRoot, worktreePath, branchName, streamIndex)
+}
+
+func (s *Supervisor) reconcileBranchSetupWorktree(ctx context.Context, worktreePath, originalBranchName, targetBranchName string) error {
+	repoRoot, err := filepath.Abs(strings.TrimSpace(s.Workplace))
+	if err != nil {
+		return fmt.Errorf("resolve workplace path: %w", err)
 	}
 
-	return worktreePath, nil
+	currentBranch, err := gitCurrentBranch(ctx, worktreePath)
+	if err != nil {
+		return fmt.Errorf("inspect current branch for worktree %s: %w", worktreePath, err)
+	}
+	if strings.TrimSpace(currentBranch) == strings.TrimSpace(targetBranchName) {
+		return nil
+	}
+
+	targetExists, err := gitBranchExists(ctx, repoRoot, targetBranchName)
+	if err != nil {
+		return fmt.Errorf("check branch %s after branch setup: %w", targetBranchName, err)
+	}
+	if targetExists {
+		if _, err := runGit(ctx, worktreePath, "switch", targetBranchName); err != nil {
+			return fmt.Errorf("switch stream worktree from %s to %s after branch setup: %w", currentBranch, targetBranchName, err)
+		}
+	} else {
+		sourceBranch := firstNonEmpty(strings.TrimSpace(currentBranch), strings.TrimSpace(originalBranchName))
+		if _, err := runGit(ctx, worktreePath, "switch", "-c", targetBranchName); err != nil {
+			return fmt.Errorf("create and switch stream worktree branch from %s to %s after branch setup: %w", sourceBranch, targetBranchName, err)
+		}
+		if sourceBranch != "" && sourceBranch != targetBranchName {
+			if _, err := runGit(ctx, repoRoot, "branch", "-D", sourceBranch); err != nil {
+				return fmt.Errorf("delete superseded stream branch %s after branch setup: %w", sourceBranch, err)
+			}
+		}
+	}
+
+	finalBranch, err := gitCurrentBranch(ctx, worktreePath)
+	if err != nil {
+		return fmt.Errorf("inspect reconciled branch for worktree %s: %w", worktreePath, err)
+	}
+	if strings.TrimSpace(finalBranch) != strings.TrimSpace(targetBranchName) {
+		return fmt.Errorf("stream worktree branch is %s after branch setup reconciliation, want %s", finalBranch, targetBranchName)
+	}
+	return nil
 }
 
 func (s *Supervisor) cleanupStreamWorktree(ctx context.Context, streamCtx *StreamContext) {
@@ -1302,6 +1371,14 @@ func gitBranchExists(ctx context.Context, dir string, branchName string) (bool, 
 	} else {
 		return false, fmt.Errorf("check branch %s: %w", branchName, cmdErr)
 	}
+}
+
+func gitCurrentBranch(ctx context.Context, dir string) (string, error) {
+	out, err := runGit(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("current branch in %s: %w", dir, err)
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {

@@ -1,4 +1,4 @@
-You are running inside the stream-specific git worktree for this stream. Merge the completed stream branch back into `main`. Use the source branch name from the task prompt, ensure the working tree is clean, update `main`, attempt the merge, and clearly report whether the merge succeeded, conflicted, or was skipped. If your environment is configured to open pull requests instead of merging directly, follow that workflow and report the result.
+You are running from the repository root while merging a completed stream branch back into `main`. Use the source branch name from the task prompt and the referenced stream worktree as needed, ensure the working tree is clean, update `main`, attempt the merge, and clearly report whether the merge succeeded, conflicted, or was skipped. If your environment is configured to open pull requests instead of merging directly, follow that workflow and report the result.
 
 End your response with a JSON metadata block:
 

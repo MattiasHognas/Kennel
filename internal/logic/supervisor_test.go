@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,12 +104,26 @@ func TestRunPlanIterativelyExecutesSingleNextSteps(t *testing.T) {
 		case "frontend-developer":
 			return &stubACPClient{
 				messages: &frontendMessages,
-				response: "Implemented UI\n\n```json\n{\"summary\":\"UI implemented\",\"files_modified\":[\"ui.go\"],\"completion_status\":\"full\"}\n```",
+				responder: func(ctx context.Context, msg string) (string, error) {
+					branch, err := gitCurrentBranch(context.Background(), workplace)
+					if err != nil {
+						t.Fatalf("gitCurrentBranch returned error: %v", err)
+					}
+					if branch != "test-project/run/stream-0" {
+						t.Fatalf("frontend workplace branch = %q, want %q", branch, "test-project/run/stream-0")
+					}
+					return "Implemented UI\n\n```json\n{\"summary\":\"UI implemented\",\"files_modified\":[\"ui.go\"],\"completion_status\":\"full\"}\n```", nil
+				},
 			}, nil
 		case "branch-merger":
 			return &stubACPClient{
 				messages: &branchMergerMessages,
-				response: "Merged stream branch into main\n\n```json\n{\"summary\":\"Merged stream branch into main\",\"branch_name\":\"main\",\"merge_status\":\"merged\",\"completion_status\":\"full\"}\n```",
+				responder: func(ctx context.Context, msg string) (string, error) {
+					if workplace != project.Workplace {
+						t.Fatalf("branch merger workplace = %q, want repository root %q", workplace, project.Workplace)
+					}
+					return "Merged stream branch into main\n\n```json\n{\"summary\":\"Merged stream branch into main\",\"branch_name\":\"main\",\"merge_status\":\"merged\",\"completion_status\":\"full\"}\n```", nil
+				},
 			}, nil
 		default:
 			t.Fatalf("unexpected ACP topic %q", topic)
@@ -371,7 +386,10 @@ func TestRunPlanAllowsConcurrentInstancesOfSameAgentAcrossStreams(t *testing.T) 
 				return `{"completed":true,"reason":"Done"}`, nil
 			}}, nil
 		case "branch-setup":
-			return &stubACPClient{response: "Branch ready\n\n```json\n{\"summary\":\"Branch ready\",\"branch_name\":\"stream\",\"completion_status\":\"full\"}\n```"}, nil
+			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
+				streamID := promptStreamID(t, msg)
+				return "Branch ready\n\n```json\n{\"summary\":\"Branch ready\",\"branch_name\":\"stream-" + strconv.Itoa(streamID) + "\",\"completion_status\":\"full\"}\n```", nil
+			}}, nil
 		case "frontend-developer":
 			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
 				current := atomic.AddInt32(&concurrent, 1)
@@ -472,7 +490,7 @@ func TestRunPlanUsesSeparateWorktreesPerStream(t *testing.T) {
 			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
 				streamID := promptStreamID(t, msg)
 				recordStreamWorkplace(streamID, workplace)
-				return "Branch ready\n\n```json\n{\"summary\":\"Branch ready\",\"branch_name\":\"stream\",\"completion_status\":\"full\"}\n```", nil
+				return "Branch ready\n\n```json\n{\"summary\":\"Branch ready\",\"branch_name\":\"stream-" + strconv.Itoa(streamID) + "\",\"completion_status\":\"full\"}\n```", nil
 			}}, nil
 		case "frontend-developer":
 			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
@@ -483,7 +501,9 @@ func TestRunPlanUsesSeparateWorktreesPerStream(t *testing.T) {
 		case "branch-merger":
 			return &stubACPClient{responder: func(ctx context.Context, msg string) (string, error) {
 				streamID := promptStreamID(t, msg)
-				recordStreamWorkplace(streamID, workplace)
+				if workplace != project.Workplace {
+					t.Fatalf("branch merger workplace for stream %d = %q, want repository root %q", streamID, workplace, project.Workplace)
+				}
 				return "Merged stream branch into main\n\n```json\n{\"summary\":\"Merged stream branch into main\",\"branch_name\":\"main\",\"merge_status\":\"merged\",\"completion_status\":\"full\"}\n```", nil
 			}}, nil
 		default:
@@ -542,6 +562,35 @@ func TestCleanupStreamWorktreeUsesDetachedContext(t *testing.T) {
 
 	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
 		t.Fatalf("worktree %q still exists after cleanup with cancelled context; stat err=%v", worktreePath, err)
+	}
+}
+
+func TestEnsureStreamWorktreeRecreatesMismatchedExistingBranch(t *testing.T) {
+	repo := newTestRepository(t)
+	project := newTestProject(t, repo)
+	eb := data.NewEventBus()
+	super := NewSupervisor(repo, eb, t.TempDir(), project.ID, project.Name, project.Workplace)
+	super.Logger = nil
+
+	worktreePath, err := super.ensureStreamWorktree(context.Background(), 0, "expected-branch")
+	if err != nil {
+		t.Fatalf("ensureStreamWorktree returned error: %v", err)
+	}
+	if _, err := runGit(context.Background(), worktreePath, "switch", "-c", "wrong-branch"); err != nil {
+		t.Fatalf("switch to wrong branch returned error: %v", err)
+	}
+
+	worktreePath, err = super.ensureStreamWorktree(context.Background(), 0, "expected-branch")
+	if err != nil {
+		t.Fatalf("ensureStreamWorktree after mismatch returned error: %v", err)
+	}
+
+	branch, err := gitCurrentBranch(context.Background(), worktreePath)
+	if err != nil {
+		t.Fatalf("gitCurrentBranch returned error: %v", err)
+	}
+	if branch != "expected-branch" {
+		t.Fatalf("worktree branch = %q, want %q", branch, "expected-branch")
 	}
 }
 
@@ -742,7 +791,9 @@ func newTestProject(t *testing.T, repo *data.SQLiteRepository) data.Project {
 func initGitRepository(t *testing.T, dir string) {
 	t.Helper()
 
-	runGitCommand(t, dir, "init", "-b", "main")
+	requireGit(t)
+	runGitCommand(t, dir, "init")
+	runGitCommand(t, dir, "checkout", "-b", "main")
 	runGitCommand(t, dir, "config", "user.name", "Test User")
 	runGitCommand(t, dir, "config", "user.email", "test@example.com")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("test\n"), 0o644); err != nil {
@@ -750,6 +801,14 @@ func initGitRepository(t *testing.T, dir string) {
 	}
 	runGitCommand(t, dir, "add", "README.md")
 	runGitCommand(t, dir, "commit", "-m", "initial commit")
+}
+
+func requireGit(t *testing.T) {
+	t.Helper()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("skipping git-backed supervisor test: git not available: %v", err)
+	}
 }
 
 func runGitCommand(t *testing.T, dir string, args ...string) {
