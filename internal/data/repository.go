@@ -33,6 +33,8 @@ type Agent struct {
 	State       string
 	Output      string
 	InstanceKey string
+	StreamID    sql.NullInt64
+	BranchName  string
 	CreatedAt   time.Time
 }
 
@@ -135,6 +137,7 @@ func (r *SQLiteRepository) CreateProjectConfiguration(ctx context.Context, name,
 
 func (r *SQLiteRepository) AddAgentToProject(ctx context.Context, projectID int64, name, instanceKey string) (Agent, error) {
 	name = strings.TrimSpace(name)
+	instanceKey = strings.TrimSpace(instanceKey)
 	if projectID <= 0 {
 		return Agent{}, errors.New("project id must be positive")
 	}
@@ -147,9 +150,9 @@ func (r *SQLiteRepository) AddAgentToProject(ctx context.Context, projectID int6
 	}
 
 	result, err := r.db.ExecContext(ctx, `
-		INSERT INTO agents(project_id, name, state, instance_key)
-		VALUES (?, ?, ?, ?)
-	`, projectID, name, "stopped", instanceKey)
+		INSERT INTO agents(project_id, name, state, instance_key, stream_id, branch_name)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectID, name, "stopped", instanceKey, sql.NullInt64{}, "")
 	if err != nil {
 		return Agent{}, fmt.Errorf("insert agent: %w", err)
 	}
@@ -159,18 +162,41 @@ func (r *SQLiteRepository) AddAgentToProject(ctx context.Context, projectID int6
 		return Agent{}, fmt.Errorf("fetch agent id: %w", err)
 	}
 
-	row := r.db.QueryRowContext(ctx, `
-		SELECT id, project_id, name, state, instance_key, created_at
-		FROM agents
-		WHERE id = ?
-	`, id)
+	return r.readAgentByID(ctx, id)
+}
 
-	var agent Agent
-	if err := row.Scan(&agent.ID, &agent.ProjectID, &agent.Name, &agent.State, &agent.InstanceKey, &agent.CreatedAt); err != nil {
-		return Agent{}, fmt.Errorf("read inserted agent: %w", err)
+func (r *SQLiteRepository) AddAgentToStream(ctx context.Context, projectID int64, streamID int, name, instanceKey, branchName string) (Agent, error) {
+	name = strings.TrimSpace(name)
+	instanceKey = strings.TrimSpace(instanceKey)
+	branchName = strings.TrimSpace(branchName)
+	if projectID <= 0 {
+		return Agent{}, errors.New("project id must be positive")
+	}
+	if streamID < 0 {
+		return Agent{}, errors.New("stream id cannot be negative")
+	}
+	if name == "" {
+		return Agent{}, errors.New("agent name cannot be empty")
 	}
 
-	return agent, nil
+	if err := r.ProjectExists(ctx, projectID); err != nil {
+		return Agent{}, err
+	}
+
+	result, err := r.db.ExecContext(ctx, `
+		INSERT INTO agents(project_id, name, state, instance_key, stream_id, branch_name)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectID, name, "stopped", instanceKey, nullableStreamID(streamID), branchName)
+	if err != nil {
+		return Agent{}, fmt.Errorf("insert agent: %w", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return Agent{}, fmt.Errorf("fetch agent id: %w", err)
+	}
+
+	return r.readAgentByID(ctx, id)
 }
 
 func (r *SQLiteRepository) UpdateProjectConfiguration(ctx context.Context, projectID int64, name, workplace, instructions string) error {
@@ -412,7 +438,7 @@ func (r *SQLiteRepository) ReadProjects(ctx context.Context) ([]Project, error) 
 
 func (r *SQLiteRepository) readAgents(ctx context.Context, projectID int64) ([]Agent, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, project_id, name, state, output, instance_key, created_at
+		SELECT id, project_id, name, state, output, instance_key, stream_id, branch_name, created_at
 		FROM agents
 		WHERE project_id = ?
 		ORDER BY created_at ASC, id ASC
@@ -425,7 +451,7 @@ func (r *SQLiteRepository) readAgents(ctx context.Context, projectID int64) ([]A
 	agents := make([]Agent, 0)
 	for rows.Next() {
 		var agent Agent
-		if err := rows.Scan(&agent.ID, &agent.ProjectID, &agent.Name, &agent.State, &agent.Output, &agent.InstanceKey, &agent.CreatedAt); err != nil {
+		if err := rows.Scan(&agent.ID, &agent.ProjectID, &agent.Name, &agent.State, &agent.Output, &agent.InstanceKey, &agent.StreamID, &agent.BranchName, &agent.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan agent: %w", err)
 		}
 		agent.State = normalizeState(agent.State)
@@ -485,6 +511,8 @@ func (r *SQLiteRepository) ensureSchema(ctx context.Context) error {
 		state TEXT NOT NULL DEFAULT 'stopped',
 		output TEXT NOT NULL DEFAULT '',
 		instance_key TEXT NOT NULL DEFAULT '',
+		stream_id INTEGER,
+		branch_name TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 	);
@@ -562,6 +590,24 @@ func ensureDatabaseDirectory(dsn string) error {
 	}
 
 	return nil
+}
+
+func nullableStreamID(streamID int) sql.NullInt64 {
+	return sql.NullInt64{Int64: int64(streamID), Valid: true}
+}
+
+func (r *SQLiteRepository) readAgentByID(ctx context.Context, id int64) (Agent, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, project_id, name, state, output, instance_key, stream_id, branch_name, created_at
+		FROM agents
+		WHERE id = ?
+	`, id)
+
+	var agent Agent
+	if err := row.Scan(&agent.ID, &agent.ProjectID, &agent.Name, &agent.State, &agent.Output, &agent.InstanceKey, &agent.StreamID, &agent.BranchName, &agent.CreatedAt); err != nil {
+		return Agent{}, fmt.Errorf("read inserted agent: %w", err)
+	}
+	return agent, nil
 }
 
 func (r *SQLiteRepository) CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error {

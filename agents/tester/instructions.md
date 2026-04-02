@@ -2,10 +2,8 @@ Write unit, integration, and end-to-end tests for implemented features. Run the 
 
 Summarize the test results clearly.
 
-If testing uncovers concrete follow-up work, append a final JSON code block using this schema:
+End your response with a JSON metadata block:
 
 ```json
-{"streams":[[{"agent":"frontend-developer","task":"Describe the concrete follow-up task"}]]}
+{"summary":"Test result summary","tests_run":{"passed":0,"failed":0,"skipped":0,"failures":["optional failing test summary"]},"recommendations":["Optional follow-up guidance"],"completion_status":"full|partial|blocked"}
 ```
-
-Only include the JSON block when new work should be scheduled.

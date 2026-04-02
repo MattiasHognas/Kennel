@@ -31,6 +31,20 @@ type Plan struct {
 	Streams []TaskStream `json:"streams"`
 }
 
+type StreamDefinition struct {
+	Task string `json:"task"`
+}
+
+type StreamPlan struct {
+	Streams []StreamDefinition `json:"streams"`
+}
+
+type PlanDecision struct {
+	Completed bool      `json:"completed"`
+	NextTask  *PlanTask `json:"next_task,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+}
+
 type executionTask struct {
 	PlanTask
 	InstanceKey string
@@ -53,6 +67,21 @@ type executionState struct {
 	agentLocksMu       *sync.Mutex
 }
 
+type StreamContext struct {
+	StreamID         int
+	MainTask         string
+	BranchName       string
+	ExecutionHistory []ExecutedStep
+	PlannerOutputs   []string
+}
+
+type ExecutedStep struct {
+	Agent  string
+	Task   string
+	Output string
+	Summary string
+}
+
 func ParsePlanOutput(output string) (Plan, error) {
 	return parsePlanJSON(extractPlanJSON(output))
 }
@@ -67,6 +96,7 @@ const (
 
 type Repository interface {
 	AddAgentToProject(ctx context.Context, projectID int64, name, instanceKey string) (data.Agent, error)
+	AddAgentToStream(ctx context.Context, projectID int64, streamID int, name, instanceKey, branchName string) (data.Agent, error)
 	CheckpointSupervisorRun(ctx context.Context, projectID int64, stepIndex int, status, data string) error
 	NewActivity(ctx context.Context, projectID int64, agentID sql.NullInt64, text string) (data.Activity, error)
 	ReadProject(ctx context.Context, projectID int64) (data.Project, error)
@@ -171,147 +201,15 @@ func (s *Supervisor) RunPlan(ctx context.Context, instructions string, configure
 	registerBuiltinAgents(agentMap)
 
 	planningAgents := availablePlanningAgents(agentMap, configuredAgents)
-
-	plannerTask := PlanTask{Agent: plannerAgentName, Task: "Create an execution plan based on the project instructions."}
-	plannerDef, ok := agentMap[plannerTask.Agent]
-	if !ok {
-		return s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("planner agent definition missing"))
+	streamPlan, plannerErr := s.runInitialPlanner(ctx, instructions, planningAgents, agentMap, agentStateMap, completedBeforeRun, &agentStateMu)
+	if plannerErr != nil {
+		return plannerErr
 	}
 
-	var planOutput string
-	plannerRec, plannerFound := agentStateMap[plannerTask.Agent]
-	if !plannerFound {
-		plannerRec, err = s.Repo.AddAgentToProject(ctx, s.ProjectID, plannerTask.Agent, plannerTask.Agent)
-		if err != nil {
-			return s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("add agent %s: %w", plannerTask.Agent, err))
-		}
-		agentStateMap[plannerTask.Agent] = plannerRec
-		s.logAgentCreated(plannerRec.Name)
-		s.publishSync(plannerRec, plannerRec.State, "")
-	}
+	publishedPlan := emptyPublishedPlan(streamPlan)
+	s.publishPlan(publishedPlan)
 
-	if plannerRec.State != "completed" {
-		if err := s.markAgentRunning(ctx, plannerRec, plannerTask.Task); err != nil {
-			return s.failAgentAndStop(ctx, plannerRec, 0, "planning_failed", err)
-		}
-		plannerRec.State = "running"
-		agentStateMap[plannerTask.Agent] = plannerRec
-
-		plannerWrapper, err := s.AcpFactory(ctx, plannerDef, s.EventBus, s.Workplace, "planner")
-		if err != nil {
-			return s.failAgentAndStop(ctx, plannerRec, 0, "planning_launch_failed", err)
-		}
-		s.attachACPLogger(plannerWrapper)
-		defer plannerWrapper.Close()
-
-		planPrompt := fmt.Sprintf(`Create an execution plan based on these instructions: %s
-
-You must output a JSON object containing an array of 'streams', where each stream is an array of tasks that must run sequentially.
-Each task must have an 'agent' and a 'task' string. Allow parallel streams.
-Use only these exact agent names for plan tasks: %v
-Do not use planner, branch-setup, supervisor, or general_purpose unless they appear exactly in the allowed list.
-		Ensure the response is purely the JSON or embedded in a Markdown block.`, instructions, planningAgents)
-
-		s.logAgentInput(plannerTask.Agent, planPrompt)
-		planOutput, err = plannerWrapper.Prompt(ctx, planPrompt)
-		if err != nil {
-			return s.failAgentAndStop(ctx, plannerRec, 0, "planning_failed", err)
-		}
-		s.logAgentOutput(plannerTask.Agent, planOutput)
-	} else {
-		planOutput = plannerRec.Output
-		s.logAgentActivity(plannerTask.Agent, "reused completed output")
-	}
-
-	rawJSON := extractPlanJSON(planOutput)
-	plan, err := parsePlanJSON(rawJSON)
-	if err != nil {
-		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_json_parse_failed", err)
-	}
-
-	if err := normalizePlan(&plan); err != nil {
-		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
-	}
-
-	if err := resolvePlanAgents(&plan, agentMap); err != nil {
-		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
-	}
-
-	mainStreams, err := s.prepareExecutionStreams(ctx, plan, 0, agentMap, agentStateMap, false)
-	if err != nil {
-		return s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
-	}
-	s.publishPlan(plan)
-
-	if plannerRec.State != "completed" {
-		if err := s.completeAgent(ctx, agentStateMap[plannerAgentName], planOutput); err != nil {
-			s.reportAgentError(plannerTask.Agent, "Failed to persist planner completion: %v", err)
-		} else {
-			plannerRec = agentStateMap[plannerAgentName]
-			plannerRec.Output = planOutput
-			plannerRec.State = "completed"
-			agentStateMap[plannerAgentName] = plannerRec
-		}
-	}
-
-	branchSetupTask := PlanTask{Agent: branchSetupAgentName, Task: "Initialize branch context based on plan."}
-	branchSetupDef := agentMap[branchSetupTask.Agent]
-
-	var setupOut string
-	branchSetupRec, branchSetupFound := agentStateMap[branchSetupTask.Agent]
-	if !branchSetupFound {
-		branchSetupRec, err = s.Repo.AddAgentToProject(ctx, s.ProjectID, branchSetupTask.Agent, branchSetupTask.Agent)
-		if err != nil {
-			return s.failStop(ctx, 1, "agent_state_not_found", fmt.Errorf("add agent %s: %w", branchSetupTask.Agent, err))
-		}
-		agentStateMap[branchSetupTask.Agent] = branchSetupRec
-		s.logAgentCreated(branchSetupRec.Name)
-		s.publishSync(branchSetupRec, branchSetupRec.State, "")
-	}
-
-	if branchSetupRec.State != "completed" {
-		if err := s.validateWorkplaceGitRoot(ctx); err != nil {
-			return s.failAgentAndStop(ctx, branchSetupRec, 1, "workplace_validation_failed", err)
-		}
-		if err := s.markAgentRunning(ctx, branchSetupRec, branchSetupTask.Task); err != nil {
-			return s.failAgentAndStop(ctx, branchSetupRec, 1, "execution_failed", err)
-		}
-		branchSetupRec.State = "running"
-		agentStateMap[branchSetupTask.Agent] = branchSetupRec
-
-		setupWrapper, err := s.AcpFactory(ctx, branchSetupDef, s.EventBus, s.Workplace, branchSetupTask.Agent)
-		if err != nil {
-			return s.failAgentAndStop(ctx, branchSetupRec, 1, "launch_failed", err)
-		}
-		s.attachACPLogger(setupWrapper)
-
-		setupPrompt := s.buildBranchSetupPrompt(branchSetupTask.Task, rawJSON, branchSetupDef.PromptContext.PreviousOutput)
-		s.logAgentInput(branchSetupTask.Agent, setupPrompt)
-		setupOut, err = setupWrapper.Prompt(ctx, setupPrompt)
-		setupWrapper.Close()
-		if err != nil {
-			return s.failAgentAndStop(ctx, branchSetupRec, 1, "execution_failed", err)
-		}
-		s.logAgentOutput(branchSetupTask.Agent, setupOut)
-
-		if err := s.completeAgent(ctx, agentStateMap[branchSetupAgentName], setupOut); err != nil {
-			s.reportAgentError(branchSetupTask.Agent, "Failed to persist branch setup completion: %v", err)
-		} else {
-			branchSetupRec = agentStateMap[branchSetupAgentName]
-			branchSetupRec.Output = setupOut
-			branchSetupRec.State = "completed"
-			agentStateMap[branchSetupAgentName] = branchSetupRec
-		}
-	} else {
-		setupOut = branchSetupRec.Output
-		s.logAgentActivity(branchSetupTask.Agent, "reused completed output")
-	}
-
-	if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, 1, "completed", setupOut); saveErr != nil {
-		return s.failStop(ctx, 1, "checkpoint_failed", fmt.Errorf("checkpoint after branch setup: %w", saveErr))
-	}
-
-	stepCounter := int64(1)
+	stepCounter := int64(0)
 	planMu := &sync.Mutex{}
 	execState := &executionState{
 		agentMap:           agentMap,
@@ -321,13 +219,13 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 		executedAgents:     make(map[string]struct{}),
 		planningAgents:     planningAgents,
 		stepCounter:        &stepCounter,
-		publishedPlan:      &plan,
+		publishedPlan:      &publishedPlan,
 		planMu:             planMu,
 		agentLocks:         make(map[string]*sync.Mutex),
 		agentLocksMu:       &sync.Mutex{},
 	}
 
-	if err := s.executePlan(ctx, mainStreams, setupOut, execState); err != nil {
+	if err := s.executeStreamPlan(ctx, streamPlan, execState); err != nil {
 		return s.failStop(ctx, -1, "stream_execution_failed", err)
 	}
 
@@ -336,6 +234,155 @@ Do not use planner, branch-setup, supervisor, or general_purpose unless they app
 	}
 
 	return nil
+}
+
+func (s *Supervisor) runInitialPlanner(ctx context.Context, instructions string, planningAgents []string, agentMap map[string]data.AgentDefinition, agentStateMap map[string]data.Agent, completedBeforeRun map[string]struct{}, agentStateMu *sync.RWMutex) (StreamPlan, error) {
+	plannerTask := PlanTask{Agent: plannerAgentName, Task: "Create parallel work streams for the project instructions."}
+	plannerDef, ok := agentMap[plannerTask.Agent]
+	if !ok {
+		return StreamPlan{}, s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("planner agent definition missing"))
+	}
+
+	plannerRec, found := agentStateMap[plannerTask.Agent]
+	if !found {
+		var err error
+		plannerRec, err = s.Repo.AddAgentToProject(ctx, s.ProjectID, plannerTask.Agent, plannerTask.Agent)
+		if err != nil {
+			return StreamPlan{}, s.failStop(ctx, 0, "planning_validation_failed", fmt.Errorf("add agent %s: %w", plannerTask.Agent, err))
+		}
+		agentStateMap[plannerTask.Agent] = plannerRec
+		s.logAgentCreated(plannerRec.Name)
+		s.publishSync(plannerRec, plannerRec.State, "")
+	}
+
+	prompt := buildInitialPlannerPrompt(instructions, planningAgents)
+	output, err := s.runPromptedAgent(ctx, plannerRec, plannerTask.Agent, plannerTask.Task, prompt, plannerDef, nil)
+	if err != nil {
+		return StreamPlan{}, s.failAgentAndStop(ctx, plannerRec, 0, "planning_failed", err)
+	}
+
+	agentStateMu.Lock()
+	agentStateMap[plannerTask.Agent] = refreshAgentCompletion(agentStateMap[plannerTask.Agent], output)
+	completedBeforeRun[plannerTask.Agent] = struct{}{}
+	agentStateMu.Unlock()
+
+	streamPlan, err := parseStreamPlanJSON(extractPlanJSON(output))
+	if err != nil {
+		return StreamPlan{}, s.failAgentAndStop(ctx, plannerRec, 0, "planning_json_parse_failed", err)
+	}
+	if err := normalizeStreamPlan(&streamPlan); err != nil {
+		return StreamPlan{}, s.failAgentAndStop(ctx, plannerRec, 0, "planning_validation_failed", err)
+	}
+
+	return streamPlan, nil
+}
+
+func (s *Supervisor) executeStreamPlan(ctx context.Context, streamPlan StreamPlan, state *executionState) error {
+	g, gCtx := errgroup.WithContext(ctx)
+	for streamIndex, streamDef := range streamPlan.Streams {
+		streamIndex := streamIndex
+		streamDef := streamDef
+		g.Go(func() error {
+			return s.executeStream(gCtx, streamIndex, streamDef, state)
+		})
+	}
+	return g.Wait()
+}
+
+func (s *Supervisor) executeStream(ctx context.Context, streamIndex int, streamDef StreamDefinition, state *executionState) error {
+	if err := s.validateWorkplaceGitRoot(ctx); err != nil {
+		branchRec, recErr := s.ensureStreamAgentRecord(ctx, branchSetupAgentName, branchSetupInstanceKey(streamIndex), streamIndex, "", state)
+		if recErr == nil {
+			return s.failAgentAndStop(ctx, branchRec, streamIndex+1, "workplace_validation_failed", err)
+		}
+		return err
+	}
+
+	branchName, setupOut, err := s.runBranchSetupForStream(ctx, streamIndex, streamDef.Task, state)
+	if err != nil {
+		return err
+	}
+
+	streamCtx := &StreamContext{
+		StreamID:   streamIndex,
+		MainTask:   streamDef.Task,
+		BranchName: branchName,
+	}
+
+	setupMeta, cleanedSetupOut, parseErr := ParseAgentOutput(setupOut)
+	if parseErr == nil {
+		if strings.TrimSpace(setupMeta.BranchName) != "" {
+			streamCtx.BranchName = setupMeta.BranchName
+		}
+		streamCtx.ExecutionHistory = append(streamCtx.ExecutionHistory, ExecutedStep{
+			Agent:   branchSetupAgentName,
+			Task:    "Initialize branch context for this stream.",
+			Output:  cleanedSetupOut,
+			Summary: setupMeta.Summary,
+		})
+	} else if strings.TrimSpace(setupOut) != "" {
+		streamCtx.ExecutionHistory = append(streamCtx.ExecutionHistory, ExecutedStep{
+			Agent:   branchSetupAgentName,
+			Task:    "Initialize branch context for this stream.",
+			Output:  strings.TrimSpace(setupOut),
+			Summary: summarizeOutput(setupOut),
+		})
+	}
+
+	const maxPlannerIterations = 50
+	for plannerStep := 0; plannerStep < maxPlannerIterations; plannerStep++ {
+		decision, err := s.runPlannerDecision(ctx, streamCtx, plannerStep, state)
+		if err != nil {
+			return err
+		}
+		if decision.Completed {
+			return nil
+		}
+		if decision.NextTask == nil {
+			return fmt.Errorf("planner stream %d returned no next task", streamIndex)
+		}
+		tempPlan := Plan{Streams: []TaskStream{{*decision.NextTask}}}
+		if err := resolvePlanAgents(&tempPlan, state.agentMap); err != nil {
+			return err
+		}
+
+		plannedTask := tempPlan.Streams[0][0]
+		if err := s.publishPlannedStep(streamIndex, plannedTask, state); err != nil {
+			return err
+		}
+
+		stepIndex := countPlannedWorkSteps(streamCtx)
+		instanceKey := planStepInstanceKey(streamIndex, stepIndex)
+		if _, err := s.ensureStreamAgentRecord(ctx, plannedTask.Agent, instanceKey, streamIndex, streamCtx.BranchName, state); err != nil {
+			return err
+		}
+
+		taskPrompt := BuildPlannerContext(streamCtx.MainTask, latestExecutedStep(streamCtx), streamCtx)
+		out, err := s.executeTask(ctx, executionTask{
+			PlanTask:    plannedTask,
+			InstanceKey: instanceKey,
+		}, taskPrompt, state)
+		if err != nil {
+			return err
+		}
+
+		meta, cleanedOutput, parseErr := ParseAgentOutput(out)
+		if parseErr != nil {
+			meta = AgentOutputMeta{
+				Summary:          summarizeOutput(out),
+				CompletionStatus: "partial",
+			}
+			cleanedOutput = strings.TrimSpace(out)
+		}
+		streamCtx.ExecutionHistory = append(streamCtx.ExecutionHistory, ExecutedStep{
+			Agent:   plannedTask.Agent,
+			Task:    plannedTask.Task,
+			Output:  cleanedOutput,
+			Summary: meta.Summary,
+		})
+	}
+
+	return fmt.Errorf("stream %d exceeded planner iteration limit", streamIndex)
 }
 
 func normalizePlan(plan *Plan) error {
@@ -438,6 +485,258 @@ func availablePlanningAgents(agentMap map[string]data.AgentDefinition, configure
 
 	sort.Strings(selected)
 	return selected
+}
+
+func buildInitialPlannerPrompt(instructions string, planningAgents []string) string {
+	return fmt.Sprintf(`Create a JSON object containing a "streams" array.
+
+Each item in "streams" must be an object with a single "task" string describing one independent high-level work stream.
+
+Instructions: %s
+
+Available agents for later detailed steps: %s
+
+Keep the work streams high level. Do not assign an agent yet. The planner will decide the next single step for each stream later.
+Return only JSON or a Markdown JSON block.`, strings.TrimSpace(instructions), strings.Join(planningAgents, ", "))
+}
+
+func buildPlannerDecisionPrompt(streamCtx *StreamContext, planningAgents []string) string {
+	return strings.Join([]string{
+		BuildPlannerContext(streamCtx.MainTask, latestExecutedStep(streamCtx), streamCtx),
+		fmt.Sprintf("Available agents for the next step: %s", strings.Join(planningAgents, ", ")),
+		`Return a JSON object with either:
+{"completed": true, "reason": "why the stream is done"}
+
+or
+
+{"completed": false, "reason": "why this is the next step", "next_task": {"agent": "agent-name", "task": "single concrete next step"}}`,
+		"Plan only the very next step.",
+	}, "\n\n")
+}
+
+func emptyPublishedPlan(streamPlan StreamPlan) Plan {
+	plan := Plan{Streams: make([]TaskStream, len(streamPlan.Streams))}
+	for i := range plan.Streams {
+		plan.Streams[i] = TaskStream{}
+	}
+	return plan
+}
+
+func normalizeStreamPlan(plan *StreamPlan) error {
+	for index := range plan.Streams {
+		plan.Streams[index].Task = strings.TrimSpace(plan.Streams[index].Task)
+		if plan.Streams[index].Task == "" {
+			return fmt.Errorf("stream %d has empty task", index)
+		}
+	}
+	return nil
+}
+
+func parseStreamPlanJSON(rawJSON string) (StreamPlan, error) {
+	var plan StreamPlan
+	if err := json.Unmarshal([]byte(rawJSON), &plan); err != nil {
+		return StreamPlan{}, err
+	}
+	return plan, nil
+}
+
+func parsePlanDecision(output string) (PlanDecision, error) {
+	var decision PlanDecision
+	if err := json.Unmarshal([]byte(extractPlanJSON(output)), &decision); err != nil {
+		return PlanDecision{}, err
+	}
+	if !decision.Completed {
+		if decision.NextTask == nil {
+			return PlanDecision{}, fmt.Errorf("planner decision missing next task")
+		}
+		decision.NextTask.Agent = strings.TrimSpace(decision.NextTask.Agent)
+		decision.NextTask.Task = strings.TrimSpace(decision.NextTask.Task)
+		if decision.NextTask.Agent == "" || decision.NextTask.Task == "" {
+			return PlanDecision{}, fmt.Errorf("planner decision next task must include agent and task")
+		}
+	}
+	return decision, nil
+}
+
+func refreshAgentCompletion(agent data.Agent, output string) data.Agent {
+	agent.Output = output
+	agent.State = "completed"
+	return agent
+}
+
+func latestExecutedStep(streamCtx *StreamContext) *ExecutedStep {
+	if streamCtx == nil || len(streamCtx.ExecutionHistory) == 0 {
+		return nil
+	}
+	last := streamCtx.ExecutionHistory[len(streamCtx.ExecutionHistory)-1]
+	return &last
+}
+
+func countPlannedWorkSteps(streamCtx *StreamContext) int {
+	if streamCtx == nil {
+		return 0
+	}
+	count := 0
+	for _, step := range streamCtx.ExecutionHistory {
+		if CanonicalAgentName(step.Agent) == branchSetupAgentName {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func branchSetupInstanceKey(streamIndex int) string {
+	return fmt.Sprintf("branch-setup:s%d", streamIndex)
+}
+
+func plannerStepInstanceKey(streamIndex, plannerStep int) string {
+	return fmt.Sprintf("planner:s%d:p%d", streamIndex, plannerStep)
+}
+
+func (s *Supervisor) ensureStreamAgentRecord(ctx context.Context, agentName, instanceKey string, streamIndex int, branchName string, state *executionState) (data.Agent, error) {
+	state.agentStateMu.RLock()
+	agentRec, found := state.agentStateMap[instanceKey]
+	state.agentStateMu.RUnlock()
+	if found {
+		return agentRec, nil
+	}
+
+	agentRec, err := s.Repo.AddAgentToStream(ctx, s.ProjectID, streamIndex, agentName, instanceKey, branchName)
+	if err != nil {
+		return data.Agent{}, fmt.Errorf("add agent %s: %w", agentName, err)
+	}
+
+	state.agentStateMu.Lock()
+	state.agentStateMap[instanceKey] = agentRec
+	state.agentStateMu.Unlock()
+	s.logAgentCreated(agentName)
+	s.publishSync(agentRec, agentRec.State, "")
+	return agentRec, nil
+}
+
+func (s *Supervisor) runPlannerDecision(ctx context.Context, streamCtx *StreamContext, plannerStep int, state *executionState) (PlanDecision, error) {
+	plannerDef, ok := state.agentMap[plannerAgentName]
+	if !ok {
+		return PlanDecision{}, fmt.Errorf("planner agent definition missing")
+	}
+
+	instanceKey := plannerStepInstanceKey(streamCtx.StreamID, plannerStep)
+	agentRec, err := s.ensureStreamAgentRecord(ctx, plannerAgentName, instanceKey, streamCtx.StreamID, streamCtx.BranchName, state)
+	if err != nil {
+		return PlanDecision{}, err
+	}
+
+	task := "Decide the next single step for this stream."
+	prompt := buildPlannerDecisionPrompt(streamCtx, state.planningAgents)
+	output, err := s.runPromptedAgent(ctx, agentRec, plannerAgentName, task, prompt, plannerDef, state)
+	if err != nil {
+		return PlanDecision{}, fmt.Errorf("planner step failed for stream %d: %w", streamCtx.StreamID, err)
+	}
+
+	state.agentStateMu.Lock()
+	state.agentStateMap[instanceKey] = refreshAgentCompletion(agentRec, output)
+	state.executedAgents[instanceKey] = struct{}{}
+	state.agentStateMu.Unlock()
+
+	streamCtx.PlannerOutputs = append(streamCtx.PlannerOutputs, output)
+
+	decision, err := parsePlanDecision(output)
+	if err != nil {
+		return PlanDecision{}, err
+	}
+	if !decision.Completed {
+		tempPlan := Plan{Streams: []TaskStream{{*decision.NextTask}}}
+		if err := resolvePlanAgents(&tempPlan, state.agentMap); err != nil {
+			return PlanDecision{}, err
+		}
+		resolvedTask := tempPlan.Streams[0][0]
+		decision.NextTask = &resolvedTask
+	}
+	return decision, nil
+}
+
+func (s *Supervisor) runBranchSetupForStream(ctx context.Context, streamIndex int, mainTask string, state *executionState) (string, string, error) {
+	def, ok := state.agentMap[branchSetupAgentName]
+	if !ok {
+		return "", "", fmt.Errorf("branch-setup agent definition missing")
+	}
+
+	branchName := s.streamBranchName(streamIndex)
+	instanceKey := branchSetupInstanceKey(streamIndex)
+	agentRec, err := s.ensureStreamAgentRecord(ctx, branchSetupAgentName, instanceKey, streamIndex, branchName, state)
+	if err != nil {
+		return "", "", err
+	}
+
+	task := "Initialize branch context for this stream."
+	prompt := s.buildBranchSetupPrompt(streamIndex, task, mainTask, def.PromptContext.PreviousOutput)
+	output, err := s.runPromptedAgent(ctx, agentRec, branchSetupAgentName, task, prompt, def, state)
+	if err != nil {
+		return "", "", err
+	}
+
+	state.agentStateMu.Lock()
+	state.agentStateMap[instanceKey] = refreshAgentCompletion(agentRec, output)
+	state.executedAgents[instanceKey] = struct{}{}
+	state.agentStateMu.Unlock()
+
+	meta, _, parseErr := ParseAgentOutput(output)
+	if parseErr == nil && strings.TrimSpace(meta.BranchName) != "" {
+		branchName = meta.BranchName
+	}
+
+	return branchName, output, nil
+}
+
+func (s *Supervisor) runPromptedAgent(ctx context.Context, agentRec data.Agent, agentName, task, prompt string, def data.AgentDefinition, state *executionState) (string, error) {
+	if err := s.markAgentRunning(ctx, agentRec, task); err != nil {
+		return "", err
+	}
+
+	wrapper, err := s.AcpFactory(ctx, def, s.EventBus, s.Workplace, agentName)
+	if err != nil {
+		if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
+			s.reportAgentError(agentName, "Failed to persist agent failure: %v", failErr)
+		}
+		return "", fmt.Errorf("launch_failed for %s: %w", agentName, err)
+	}
+	defer wrapper.Close()
+	s.attachACPLogger(wrapper)
+
+	s.logAgentInput(agentName, prompt)
+	out, err := wrapper.Prompt(ctx, prompt)
+	if err != nil {
+		if failErr := s.markAgentFailed(ctx, agentRec, err); failErr != nil {
+			s.reportAgentError(agentName, "Failed to persist agent failure: %v", failErr)
+		}
+		return "", fmt.Errorf("execution_failed for %s: %w", agentName, err)
+	}
+	s.logAgentOutput(agentName, out)
+
+	if err := s.completeAgent(ctx, agentRec, out); err != nil {
+		s.reportAgentError(agentName, "Failed to persist agent completion: %v", err)
+	}
+
+	if state != nil {
+		checkpointIndex := int(atomic.AddInt64(state.stepCounter, 1))
+		if saveErr := s.Repo.CheckpointSupervisorRun(ctx, s.ProjectID, checkpointIndex, "completed", out); saveErr != nil {
+			return "", fmt.Errorf("checkpoint after %s: %w", agentName, saveErr)
+		}
+	}
+	return out, nil
+}
+
+func (s *Supervisor) publishPlannedStep(streamIndex int, task PlanTask, state *executionState) error {
+	state.planMu.Lock()
+	defer state.planMu.Unlock()
+
+	if streamIndex < 0 || streamIndex >= len(state.publishedPlan.Streams) {
+		return fmt.Errorf("stream index %d out of range", streamIndex)
+	}
+	state.publishedPlan.Streams[streamIndex] = append(state.publishedPlan.Streams[streamIndex], task)
+	s.publishPlan(clonePlan(*state.publishedPlan))
+	return nil
 }
 
 func (s *Supervisor) prepareExecutionStreams(ctx context.Context, plan Plan, streamOffset int, agentMap map[string]data.AgentDefinition, agentStateMap map[string]data.Agent, forceRun bool) ([]executionStream, error) {
@@ -595,32 +894,6 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 		return "", fmt.Errorf("checkpoint after %s: %w", step.Agent, saveErr)
 	}
 
-	followUpPlan, hasFollowUp, err := parseFollowUpPlan(step.Agent, out)
-	if err != nil {
-		return "", fmt.Errorf("follow-up plan failed for %s: %w", step.Agent, err)
-	}
-	if hasFollowUp {
-		if err := resolvePlanAgents(&followUpPlan, state.agentMap); err != nil {
-			return "", fmt.Errorf("follow-up plan validation failed for %s: %w", step.Agent, err)
-		}
-
-		state.planMu.Lock()
-		followUpStreamOffset := len(state.publishedPlan.Streams)
-		state.planMu.Unlock()
-
-		followUpStreams, ensureErr := s.prepareExecutionStreams(ctx, followUpPlan, followUpStreamOffset, state.agentMap, state.agentStateMap, true)
-		if ensureErr != nil {
-			return "", fmt.Errorf("follow-up plan validation failed for %s: %w", step.Agent, ensureErr)
-		}
-
-		s.recordAgentActivity(ctx, agentRec, fmt.Sprintf("scheduled %d follow-up stream(s)", len(followUpPlan.Streams)))
-		s.publishPlan(appendPublishedPlan(state, followUpPlan))
-
-		if err := s.executePlan(ctx, followUpStreams, out, state); err != nil {
-			return "", err
-		}
-	}
-
 	return out, nil
 }
 
@@ -662,15 +935,15 @@ func buildTaskPrompt(task string, previousOutput string, includePreviousOutput b
 
 func buildAgentTaskPrompt(agentName, task, previousOutput string, includePreviousOutput bool, planningAgents []string) string {
 	prompt := buildTaskPrompt(task, previousOutput, includePreviousOutput)
-	if !canEmitFollowUpPlan(agentName) || len(planningAgents) == 0 {
+	if CanonicalAgentName(agentName) == plannerAgentName {
 		return prompt
 	}
 
 	sections := []string{
 		prompt,
-		"If you identify concrete follow-up work, append a final JSON code block with this schema: ```json\n{\"streams\":[[{\"agent\":\"agent-name\",\"task\":\"task description\"}]]}\n```",
-		"Only include the JSON block when new work should be scheduled. Keep any review or test findings before the JSON block.",
-		fmt.Sprintf("Use only these exact agent names in follow-up tasks: %s", strings.Join(planningAgents, ", ")),
+		"End your response with a final JSON code block containing planner-facing metadata.",
+		"Use this schema: ```json\n{\"summary\":\"brief result summary\",\"branch_name\":\"optional branch name\",\"files_modified\":[\"optional/file\"],\"tests_run\":{\"passed\":0,\"failed\":0,\"skipped\":0,\"failures\":[]},\"issues\":[{\"type\":\"bug|security|style|performance\",\"severity\":\"critical|high|medium|low\",\"description\":\"issue summary\",\"location\":\"optional file:line\"}],\"recommendations\":[\"optional next consideration\"],\"completion_status\":\"full|partial|blocked\"}\n```",
+		"Keep all human-readable details before the final JSON block.",
 	}
 
 	return strings.Join(sections, "\n\n")
@@ -719,28 +992,34 @@ func pathsMatch(left string, right string) bool {
 	return left == right
 }
 
-func (s *Supervisor) buildBranchSetupPrompt(task string, planJSON string, includePlan bool) string {
-	projectSlug := branchProjectSlug(s.ProjectName)
-	runID := branchRunID(s.Logger)
-	branchName := projectSlug
-	if runID != "" {
-		branchName = fmt.Sprintf("%s/%s", projectSlug, runID)
-	}
-
+func (s *Supervisor) buildBranchSetupPrompt(streamIndex int, task, mainTask string, includePreviousOutput bool) string {
+	branchName := s.streamBranchName(streamIndex)
 	sections := []string{
 		fmt.Sprintf("Task: %s", task),
+		fmt.Sprintf("Stream id: %d", streamIndex),
 		fmt.Sprintf("Project name: %s", strings.TrimSpace(s.ProjectName)),
-		fmt.Sprintf("Project slug: %s", projectSlug),
-		fmt.Sprintf("Run id: %s", runID),
+		fmt.Sprintf("Project slug: %s", branchProjectSlug(s.ProjectName)),
+		fmt.Sprintf("Run id: %s", branchRunID(s.Logger)),
 		fmt.Sprintf("Suggested branch name: %s", branchName),
+		fmt.Sprintf("Main task: %s", strings.TrimSpace(mainTask)),
 		fmt.Sprintf("Workplace: %s", strings.TrimSpace(s.Workplace)),
+		"End your response with a final JSON code block using the shared metadata schema and include branch_name.",
 	}
 
-	if includePlan && strings.TrimSpace(planJSON) != "" {
-		sections = append(sections, fmt.Sprintf("Plan JSON: %s", planJSON))
+	if includePreviousOutput {
+		sections = append(sections, "Previous context/output is not required for branch setup.")
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+func (s *Supervisor) streamBranchName(streamIndex int) string {
+	projectSlug := branchProjectSlug(s.ProjectName)
+	runID := branchRunID(s.Logger)
+	if runID == "" {
+		return fmt.Sprintf("%s/stream-%d", projectSlug, streamIndex)
+	}
+	return fmt.Sprintf("%s/%s/stream-%d", projectSlug, runID, streamIndex)
 }
 
 func branchProjectSlug(projectName string) string {
