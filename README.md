@@ -13,7 +13,7 @@ supervisor orchestrates work through an **iterative per-stream planning model**:
 1. The **planner** agent decomposes project instructions into high-level **streams**
    (independent work tracks).
 2. Each stream runs **concurrently** with its own **branch-setup** step to
-   initialise an isolated git branch.
+   initialise an isolated git branch inside a dedicated git **worktree**.
 3. For each stream, the planner is **re-invoked iteratively** to decide the
    **single next step** (or mark the stream complete).
 4. When a stream is complete, the supervisor invokes the configured
@@ -41,10 +41,10 @@ flowchart TD
     Parallel --> StreamN[Stream N...]
     
     subgraph StreamExecution["Per-Stream Execution Loop"]
-        BranchSetup[Branch Setup Agent] --> |"branch_name"| PlannerDecision[Planner: Next Step?]
+        BranchSetup[Branch Setup Agent<br/>inside stream worktree] --> |"branch_name"| PlannerDecision[Planner: Next Step?]
         PlannerDecision --> |"completed: false"| ExecuteTask[Execute Agent Task]
         ExecuteTask --> |"AgentOutputMeta"| PlannerDecision
-        PlannerDecision --> |"completed: true"| BranchMerger[Branch Merger Agent]
+        PlannerDecision --> |"completed: true"| BranchMerger[Branch Merger Agent<br/>inside stream worktree]
         BranchMerger --> StreamDone([Stream Complete])
     end
     
