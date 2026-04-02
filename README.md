@@ -24,7 +24,7 @@ supervisor:
 ```
 agents/              – Agent definitions (one directory per agent with instructions.md)
 cmd/app/             – Application entry point (Bubble Tea TUI)
-data/                – SQLite database file (projects, agents, activities)
+data/                – Runtime data directory containing `kennel.db` (projects, agents, activities)
 internal/
   data/              – SQLite repository, agent discovery, event bus, and logging
   logic/             – TUI model, supervisor orchestration, lifecycle, editor, activity tracking
