@@ -161,21 +161,34 @@ func mergeMCPServers(inherited []MCPServer, overrides []MCPServer) []MCPServer {
 	}
 
 	merged := make([]MCPServer, 0, len(inherited)+len(overrides))
+	emittedNames := make(map[string]struct{}, len(inherited)+len(overrides))
 	for _, server := range inherited {
+		if _, alreadyEmitted := emittedNames[server.Name]; alreadyEmitted {
+			continue
+		}
+
 		if override, exists := overrideByName[server.Name]; exists {
 			merged = append(merged, cloneMCPServer(override))
+			emittedNames[server.Name] = struct{}{}
 			delete(overrideByName, server.Name)
 			continue
 		}
+
 		merged = append(merged, cloneMCPServer(server))
+		emittedNames[server.Name] = struct{}{}
 	}
 
 	for _, name := range overrideOrder {
+		if _, alreadyEmitted := emittedNames[name]; alreadyEmitted {
+			continue
+		}
+
 		override, exists := overrideByName[name]
 		if !exists {
 			continue
 		}
 		merged = append(merged, cloneMCPServer(override))
+		emittedNames[name] = struct{}{}
 	}
 
 	return merged
