@@ -8,16 +8,326 @@ them and watch the agents work through a planned set of tasks in real time.
 
 Kennel uses the [Agent Control Protocol (ACP)](https://github.com/coder/acp-go-sdk)
 to communicate with AI coding agents. When a project is started the built-in
-supervisor:
+supervisor orchestrates work through an **iterative per-stream planning model**:
 
-1. Asks a **planner** agent to decompose the project instructions into a
-   structured execution plan.
-2. Runs a **branch-setup** agent to initialise the repository / branch context.
-3. Executes the planned tasks across one or more parallel streams, launching
-   the appropriate agents (backend-developer, frontend-developer, tester, …)
-   via ACP.
-4. Persists every state change and activity to a local SQLite database so runs
-   can be resumed after a restart.
+1. The **planner** agent decomposes project instructions into high-level **streams**
+   (independent work tracks).
+2. Each stream runs **concurrently** with its own **branch-setup** step to
+   initialise an isolated git branch.
+3. For each stream, the planner is **re-invoked iteratively** to decide the
+   **single next step** (or mark the stream complete).
+4. Agents return **structured metadata** so the planner can make informed
+   decisions about what to do next.
+5. All state changes and activities are persisted to a local SQLite database
+   so runs can be resumed after a restart.
+
+## Execution Flow
+
+The following diagram shows the high-level orchestration flow when a project is started:
+
+```mermaid
+flowchart TD
+    Start([Project Started]) --> InitPlanner[Planner: Create Streams]
+    InitPlanner --> |"StreamPlan JSON"| ParseStreams[Parse Stream Definitions]
+    ParseStreams --> Parallel{{"Parallel Execution"}}
+    
+    Parallel --> Stream1[Stream 1]
+    Parallel --> Stream2[Stream 2]
+    Parallel --> StreamN[Stream N...]
+    
+    subgraph StreamExecution["Per-Stream Execution Loop"]
+        BranchSetup[Branch Setup Agent] --> |"branch_name"| PlannerDecision[Planner: Next Step?]
+        PlannerDecision --> |"completed: false"| ExecuteTask[Execute Agent Task]
+        ExecuteTask --> |"AgentOutputMeta"| PlannerDecision
+        PlannerDecision --> |"completed: true"| StreamDone([Stream Complete])
+    end
+    
+    Stream1 --> BranchSetup
+    Stream2 --> BranchSetup
+    StreamN --> BranchSetup
+```
+
+### Detailed Flow
+
+#### 1. Initial Stream Planning
+
+When `Supervisor.RunPlan()` is called ([`internal/logic/supervisor.go:167`](internal/logic/supervisor.go#L167)):
+
+```mermaid
+sequenceDiagram
+    participant S as Supervisor
+    participant P as Planner Agent
+    participant DB as SQLite Repository
+    
+    S->>DB: Load agent definitions
+    S->>P: Prompt with project instructions
+    P-->>S: StreamPlan JSON
+    Note over S: {"streams": [{"task": "..."}, ...]}
+    S->>S: Parse and validate streams
+    S->>S: Launch parallel stream execution
+```
+
+The planner receives a prompt like:
+
+```
+Create a JSON object containing a "streams" array.
+Each item in "streams" must be an object with a single "task" string
+describing one independent high-level work stream.
+
+Instructions: <user instructions>
+Available agents: backend-developer, frontend-developer, tester, ...
+
+Return only JSON or a Markdown JSON block.
+```
+
+#### 2. Per-Stream Branch Setup
+
+Each stream begins with branch initialisation ([`internal/logic/supervisor.go:659`](internal/logic/supervisor.go#L659)):
+
+```mermaid
+sequenceDiagram
+    participant S as Supervisor
+    participant B as Branch-Setup Agent
+    participant DB as SQLite Repository
+    
+    S->>DB: Create agent record (stream_id, branch_name)
+    S->>B: Prompt with stream task + suggested branch
+    B-->>S: Output + AgentOutputMeta
+    Note over S: Parse branch_name from metadata
+    S->>DB: Update branch_name if changed
+    S->>S: Store in StreamContext
+```
+
+#### 3. Iterative Task Planning
+
+The planner is re-invoked for each step ([`internal/logic/supervisor.go:618`](internal/logic/supervisor.go#L618)):
+
+```mermaid
+sequenceDiagram
+    participant S as Supervisor
+    participant P as Planner Agent
+    participant W as Worker Agent
+    participant DB as SQLite Repository
+    
+    loop Until stream complete (max 50 iterations)
+        S->>P: Prompt with StreamContext
+        Note over P: Main task, history, last output
+        P-->>S: PlanDecision JSON
+        alt completed: true
+            S->>S: End stream loop
+        else completed: false
+            S->>DB: Create worker agent record
+            S->>W: Execute next_task
+            W-->>S: Output + AgentOutputMeta
+            S->>S: Append to ExecutionHistory
+        end
+    end
+```
+
+The planner decision prompt includes:
+
+```
+Main task: <stream goal>
+Stream id: <index>
+Stream branch: <branch_name>
+Execution history:
+1. [branch-setup] Initialize branch => Branch created
+2. [backend-developer] Build API => API endpoints implemented
+
+Last agent: backend-developer
+Last agent task: Build API
+Last agent summary: API endpoints implemented
+Last agent output: <full output>
+
+Available agents: backend-developer, frontend-developer, tester, ...
+
+Return JSON:
+{"completed": false, "reason": "...", "next_task": {"agent": "...", "task": "..."}}
+or
+{"completed": true, "reason": "..."}
+```
+
+## Data Flow and Contracts
+
+### StreamPlan (Initial Planning Output)
+
+```json
+{
+  "streams": [
+    {"task": "Implement backend API for jokes endpoint"},
+    {"task": "Build React frontend with joke display"}
+  ]
+}
+```
+
+Reference: [`StreamPlan` struct](internal/logic/supervisor.go#L38-L40)
+
+### PlanDecision (Per-Step Planning Output)
+
+```json
+{
+  "completed": false,
+  "reason": "Backend API is ready, now need to build the frontend",
+  "next_task": {
+    "agent": "frontend-developer",
+    "task": "Create React component to display and cycle through jokes"
+  }
+}
+```
+
+Reference: [`PlanDecision` struct](internal/logic/supervisor.go#L42-L46)
+
+### AgentOutputMeta (Worker Output)
+
+Every worker agent must end its response with a JSON metadata block:
+
+```json
+{
+  "summary": "Created JokesController with GET /api/jokes endpoint",
+  "branch_name": "feature/jokes-api",
+  "files_modified": ["Controllers/JokesController.cs", "Program.cs"],
+  "tests_run": {
+    "passed": 5,
+    "failed": 0,
+    "skipped": 0,
+    "failures": []
+  },
+  "issues": [],
+  "recommendations": ["Consider adding pagination for large joke sets"],
+  "completion_status": "full"
+}
+```
+
+Reference: [`AgentOutputMeta` struct](internal/logic/agent_output.go#L10-L18)
+
+### StreamContext (Planner Input)
+
+The supervisor builds context for planner decisions:
+
+```go
+type StreamContext struct {
+    StreamID         int            // Stream index
+    MainTask         string         // Original stream goal
+    BranchName       string         // Git branch for this stream
+    ExecutionHistory []ExecutedStep // All completed steps
+    PlannerOutputs   []string       // Raw planner outputs
+}
+```
+
+Reference: [`StreamContext` struct](internal/logic/supervisor.go#L70-L76)
+
+## Component Architecture
+
+```mermaid
+graph TB
+    subgraph TUI["Terminal UI (Bubble Tea)"]
+        Model[Model]
+        Tables[Project/Agent/Activity Tables]
+        Editor[Project Editor]
+    end
+    
+    subgraph Logic["Logic Layer"]
+        Supervisor[Supervisor]
+        Lifecycle[Lifecycle Manager]
+        AgentTree[Agent Tree View]
+    end
+    
+    subgraph Workers["Worker Layer"]
+        ACPWrapper[ACP Wrapper]
+        AgentState[Agent State Machine]
+    end
+    
+    subgraph Data["Data Layer"]
+        Repository[SQLite Repository]
+        Discovery[Agent Discovery]
+        EventBus[Event Bus]
+        Logger[Project Logger]
+    end
+    
+    subgraph External["External"]
+        ACPBinary[ACP Binary<br/>e.g. copilot]
+        SQLite[(SQLite DB)]
+        AgentDefs[agents/ Directory]
+    end
+    
+    Model --> Supervisor
+    Model --> Lifecycle
+    Model --> AgentTree
+    Supervisor --> ACPWrapper
+    Supervisor --> Repository
+    Supervisor --> EventBus
+    ACPWrapper --> ACPBinary
+    Repository --> SQLite
+    Discovery --> AgentDefs
+    Lifecycle --> Repository
+    Logger --> AgentDefs
+```
+
+### Key Components
+
+| Component | Location | Responsibility |
+|-----------|----------|----------------|
+| `Supervisor` | [`internal/logic/supervisor.go`](internal/logic/supervisor.go) | Orchestrates planning and execution |
+| `ACPWrapper` | [`internal/workers/acp.go`](internal/workers/acp.go) | Manages ACP binary lifecycle and prompts |
+| `SQLiteRepository` | [`internal/data/repository.go`](internal/data/repository.go) | Persists projects, agents, activities |
+| `AgentDefinition` | [`internal/data/discovery.go`](internal/data/discovery.go) | Loads agent configs from `agents/` |
+| `EventBus` | [`internal/data/eventbus.go`](internal/data/eventbus.go) | Publishes agent/supervisor events |
+| `Model` | [`internal/logic/model.go`](internal/logic/model.go) | Bubble Tea TUI state management |
+
+## Agent Execution Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Stopped: Agent created
+    Stopped --> Running: Task assigned
+    Running --> Completed: Success
+    Running --> Failed: Error
+    Completed --> Running: New task (force)
+    Failed --> Running: Retry
+    Completed --> [*]
+    Failed --> [*]
+```
+
+Each agent transition is:
+1. Persisted to SQLite ([`UpdateAgentState`](internal/data/repository.go#L328))
+2. Published via EventBus ([`publishSync`](internal/logic/supervisor.go#L1003))
+3. Reflected in the TUI tables
+
+## Concurrency Model
+
+```mermaid
+graph LR
+    subgraph "Main Goroutine"
+        TUI[Bubble Tea Loop]
+    end
+    
+    subgraph "Supervisor Goroutine"
+        RunPlan[RunPlan]
+    end
+    
+    subgraph "Stream Goroutines (errgroup)"
+        S1[Stream 1 Loop]
+        S2[Stream 2 Loop]
+        SN[Stream N Loop]
+    end
+    
+    subgraph "Per-Agent Locks"
+        L1[agent:s0:t0]
+        L2[agent:s1:t0]
+    end
+    
+    TUI -->|Start Project| RunPlan
+    RunPlan -->|errgroup.Go| S1
+    RunPlan -->|errgroup.Go| S2
+    RunPlan -->|errgroup.Go| SN
+    S1 -.->|acquire| L1
+    S2 -.->|acquire| L2
+```
+
+- Streams execute in parallel via [`errgroup`](https://pkg.go.dev/golang.org/x/sync/errgroup)
+- Each agent task acquires a lock keyed by instance (`s{stream}:t{step}`)
+- The planner can run concurrently across streams (each gets its own instance)
+- SQLite is configured with `MaxOpenConns(1)` for serialised writes
 
 ## Architecture
 
