@@ -131,7 +131,7 @@ Main task: <stream goal>
 Stream id: <index>
 Stream branch: <branch_name>
 Execution history:
-1. [branch-setup] Initialize branch => Branch created
+1. [branch-setup] Initialise branch => Branch created
 2. [backend-developer] Build API => API endpoints implemented
 
 Last agent: backend-developer
