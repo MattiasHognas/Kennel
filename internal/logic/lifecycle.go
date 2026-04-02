@@ -52,6 +52,7 @@ func (m *Model) startSelectedProject() tea.Cmd {
 		supervisorFactory = NewSupervisor
 	}
 	sup := supervisorFactory(m.repository, eb, defaultAgentsDir(), project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
+	sup.EventBus = eb
 	project.Runtime.Supervisor = sup
 	project.Runtime.Logger = sup.Logger
 	project.Runtime.SupervisorEvents = source.channel
