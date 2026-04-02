@@ -705,7 +705,7 @@ func (s *Supervisor) runBranchSetupForStream(ctx context.Context, streamIndex in
 func (s *Supervisor) runBranchMergerForStream(ctx context.Context, streamIndex int, streamCtx *StreamContext, state *executionState) (string, error) {
 	def, ok := state.agentMap[branchMergerAgentName]
 	if !ok {
-		return "", nil
+		return "", fmt.Errorf("branch-merger agent definition missing")
 	}
 
 	instanceKey := branchMergerInstanceKey(streamIndex)

@@ -415,7 +415,7 @@ func TestRunPlanAllowsConcurrentInstancesOfSameAgentAcrossStreams(t *testing.T) 
 	}
 }
 
-func TestRunPlanSkipsBranchMergerWhenAgentDefinitionMissing(t *testing.T) {
+func TestRunPlanSurfacesMissingBranchMergerDefinition(t *testing.T) {
 	repo := newTestRepository(t)
 	project := newTestProject(t, repo)
 	agentsRoot := newTestAgentsRoot(t, "branch-setup", "frontend-developer")
@@ -456,6 +456,17 @@ func TestRunPlanSkipsBranchMergerWhenAgentDefinitionMissing(t *testing.T) {
 
 	if strings.Join(topics, ",") != "planner,branch-setup,planner,frontend-developer,planner" {
 		t.Fatalf("ACP topics = %v, want no branch-merger execution", topics)
+	}
+
+	stored, err := repo.ReadProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("ReadProject returned error: %v", err)
+	}
+	assertAgentState(t, stored.Agents, "frontend-developer", "completed")
+	for _, agent := range stored.Agents {
+		if agent.Name == "branch-merger" {
+			t.Fatalf("unexpected branch-merger agent record: %+v", agent)
+		}
 	}
 }
 

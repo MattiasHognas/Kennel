@@ -16,8 +16,11 @@ supervisor orchestrates work through an **iterative per-stream planning model**:
    initialise an isolated git branch.
 3. For each stream, the planner is **re-invoked iteratively** to decide the
    **single next step** (or mark the stream complete).
-4. When a stream is complete, the **branch-merger** agent runs as the final
-   stream-scoped step to merge that branch back into `main`.
+4. When a stream is complete, the supervisor invokes the configured
+   **branch-merger** agent as the final stream-scoped step to merge that branch
+   back into `main`. If the agent definition is missing, the supervisor records
+   that as a merge-finalization error but still preserves the completed stream
+   work.
 5. Agents return **structured metadata** so the planner can make informed
    decisions about what to do next.
 6. All state changes and activities are persisted to a local SQLite database
@@ -129,8 +132,10 @@ sequenceDiagram
 
 #### 4. Per-Stream Branch Merge
 
-When the planner returns `{"completed": true}`, the supervisor runs the
-branch-merger agent for that stream before considering the stream finished. The
+When the planner returns `{"completed": true}`, the supervisor invokes the
+configured branch-merger agent for that stream before considering the stream
+finished. If that agent definition is missing, the supervisor surfaces a
+merge-finalization error instead of silently skipping the step. The
 branch-merger receives the stream branch, the target branch (`main`), and the
 stream execution history so it can report a merge result in structured
 metadata.
@@ -190,7 +195,9 @@ Reference: [`PlanDecision` struct](internal/logic/supervisor.go#L42-L46)
 
 ### AgentOutputMeta (Worker Output)
 
-Every worker agent must end its response with a JSON metadata block:
+Every worker agent must end its response with a JSON metadata block. Fields such
+as `branch_name` and `merge_status` are optional; `merge_status` is primarily
+used by the branch-merger finalizer:
 
 ```json
 {
