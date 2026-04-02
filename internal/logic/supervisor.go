@@ -709,18 +709,43 @@ func (s *Supervisor) runBranchMergerForStream(ctx context.Context, streamIndex i
 	}
 
 	instanceKey := branchMergerInstanceKey(streamIndex)
+	agentLock := getAgentLock(state, instanceKey)
+	agentLock.Lock()
+	defer agentLock.Unlock()
+
 	agentRec, err := s.ensureStreamAgentRecord(ctx, branchMergerAgentName, instanceKey, streamIndex, streamCtx.BranchName, state)
 	if err != nil {
 		return "", err
 	}
 
 	task := "Merge this stream branch back into main."
+	state.agentStateMu.RLock()
+	_, completedBeforeRun := state.completedBeforeRun[instanceKey]
+	_, executedThisRun := state.executedAgents[instanceKey]
+	state.agentStateMu.RUnlock()
+
+	if agentRec.State == "completed" && completedBeforeRun && !executedThisRun {
+		s.logAgentActivity(branchMergerAgentName, "reused completed output")
+		s.appendBranchMergerHistory(streamCtx, task, agentRec.Output)
+		return agentRec.Output, nil
+	}
+
 	prompt := s.buildBranchMergerPrompt(streamCtx, task, def.PromptContext.PreviousOutput)
 	output, err := s.runPromptedAgent(ctx, agentRec, branchMergerAgentName, task, prompt, def, state)
 	if err != nil {
 		return "", err
 	}
 
+	s.appendBranchMergerHistory(streamCtx, task, output)
+
+	state.agentStateMu.Lock()
+	state.agentStateMap[instanceKey] = refreshAgentCompletion(agentRec, output)
+	state.executedAgents[instanceKey] = struct{}{}
+	state.agentStateMu.Unlock()
+	return output, nil
+}
+
+func (s *Supervisor) appendBranchMergerHistory(streamCtx *StreamContext, task, output string) {
 	meta, cleanedOutput, parseErr := ParseAgentOutput(output)
 	if parseErr != nil {
 		meta = AgentOutputMeta{
@@ -738,12 +763,6 @@ func (s *Supervisor) runBranchMergerForStream(ctx context.Context, streamIndex i
 		Output:  cleanedOutput,
 		Summary: meta.Summary,
 	})
-
-	state.agentStateMu.Lock()
-	state.agentStateMap[instanceKey] = refreshAgentCompletion(agentRec, output)
-	state.executedAgents[instanceKey] = struct{}{}
-	state.agentStateMu.Unlock()
-	return output, nil
 }
 
 func (s *Supervisor) runPromptedAgent(ctx context.Context, agentRec data.Agent, agentName, task, prompt string, def data.AgentDefinition, state *executionState) (string, error) {
