@@ -338,7 +338,7 @@ func (s *Supervisor) executeStream(ctx context.Context, streamIndex int, streamD
 		}
 		if decision.Completed {
 			if _, err := s.runBranchMergerForStream(ctx, streamIndex, streamCtx, state); err != nil && s.Logger != nil {
-				s.Logger.LogProject("BRANCH_MERGE_ERROR", fmt.Sprintf("stream=%d error=%v", streamIndex, err))
+				s.Logger.LogProject("BRANCH_MERGE_ERROR", fmt.Sprintf("Failed to merge stream %d: %v", streamIndex, err))
 			}
 			return nil
 		}
@@ -595,7 +595,7 @@ func branchSetupInstanceKey(streamIndex int) string {
 }
 
 func branchMergerInstanceKey(streamIndex int) string {
-	return fmt.Sprintf("s%d:branch-merger", streamIndex)
+	return fmt.Sprintf("branch-merger:s%d", streamIndex)
 }
 
 func plannerStepInstanceKey(streamIndex, plannerStep int) string {
