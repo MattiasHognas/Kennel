@@ -112,18 +112,22 @@ func cloneMCPServers(servers []MCPServer) []MCPServer {
 
 	cloned := make([]MCPServer, 0, len(servers))
 	for _, server := range servers {
-		cloned = append(cloned, MCPServer{
-			Transport: server.Transport,
-			Name:      server.Name,
-			Command:   server.Command,
-			Args:      slices.Clone(server.Args),
-			Env:       cloneStringMap(server.Env),
-			URL:       server.URL,
-			Headers:   cloneStringMap(server.Headers),
-		})
+		cloned = append(cloned, cloneMCPServer(server))
 	}
 
 	return cloned
+}
+
+func cloneMCPServer(server MCPServer) MCPServer {
+	return MCPServer{
+		Transport: server.Transport,
+		Name:      server.Name,
+		Command:   server.Command,
+		Args:      slices.Clone(server.Args),
+		Env:       cloneStringMap(server.Env),
+		URL:       server.URL,
+		Headers:   cloneStringMap(server.Headers),
+	}
 }
 
 func cloneStringMap(source map[string]string) map[string]string {
@@ -159,11 +163,11 @@ func mergeMCPServers(inherited []MCPServer, overrides []MCPServer) []MCPServer {
 	merged := make([]MCPServer, 0, len(inherited)+len(overrides))
 	for _, server := range inherited {
 		if override, exists := overrideByName[server.Name]; exists {
-			merged = append(merged, cloneMCPServers([]MCPServer{override})[0])
+			merged = append(merged, cloneMCPServer(override))
 			delete(overrideByName, server.Name)
 			continue
 		}
-		merged = append(merged, cloneMCPServers([]MCPServer{server})[0])
+		merged = append(merged, cloneMCPServer(server))
 	}
 
 	for _, name := range overrideOrder {
@@ -171,7 +175,7 @@ func mergeMCPServers(inherited []MCPServer, overrides []MCPServer) []MCPServer {
 		if !exists {
 			continue
 		}
-		merged = append(merged, cloneMCPServers([]MCPServer{override})[0])
+		merged = append(merged, cloneMCPServer(override))
 	}
 
 	return merged
