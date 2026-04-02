@@ -84,7 +84,7 @@ func BuildPlannerContext(mainTask string, lastStep *ExecutedStep, streamContext 
 }
 
 func extractAgentOutputMeta(output string) (AgentOutputMeta, string, error) {
-	jsonBlockRegex := regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```")
+	jsonBlockRegex := regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)\\s*```")
 	matches := jsonBlockRegex.FindAllStringSubmatchIndex(output, -1)
 	for index := len(matches) - 1; index >= 0; index-- {
 		match := matches[index]
