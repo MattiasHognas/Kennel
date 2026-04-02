@@ -76,9 +76,9 @@ type StreamContext struct {
 }
 
 type ExecutedStep struct {
-	Agent  string
-	Task   string
-	Output string
+	Agent   string
+	Task    string
+	Output  string
 	Summary string
 }
 
