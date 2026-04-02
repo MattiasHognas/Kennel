@@ -6,7 +6,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/coder/acp-go-sdk v0.6.3
 	golang.org/x/sync v0.20.0
-	modernc.org/sqlite v1.47.0
+	modernc.org/sqlite v1.48.0
 )
 
 require (
