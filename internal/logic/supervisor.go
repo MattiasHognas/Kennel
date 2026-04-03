@@ -53,8 +53,6 @@ type executionTask struct {
 	ForceRun    bool
 }
 
-type executionStream []executionTask
-
 type executionState struct {
 	agentMap           map[string]data.AgentDefinition
 	agentStateMap      map[string]data.Agent
@@ -92,10 +90,8 @@ func ParsePlanOutput(output string) (Plan, error) {
 const (
 	branchSetupAgentName    = "branch-setup"
 	branchMergerAgentName   = "branch-merger"
-	codeReviewerAgentName   = "code-reviewer"
 	plannerAgentName        = "planner"
 	generalPurposeAgentName = "general-purpose"
-	testerAgentName         = "tester"
 )
 
 type Repository interface {
@@ -392,24 +388,6 @@ func (s *Supervisor) executeStream(ctx context.Context, streamIndex int, streamD
 	}
 
 	return fmt.Errorf("stream %d exceeded planner iteration limit", streamIndex)
-}
-
-func normalizePlan(plan *Plan) error {
-	for streamIdx := range plan.Streams {
-		for taskIdx := range plan.Streams[streamIdx] {
-			plan.Streams[streamIdx][taskIdx].Agent = strings.TrimSpace(plan.Streams[streamIdx][taskIdx].Agent)
-			plan.Streams[streamIdx][taskIdx].Task = strings.TrimSpace(plan.Streams[streamIdx][taskIdx].Task)
-
-			if plan.Streams[streamIdx][taskIdx].Agent == "" {
-				return fmt.Errorf("plan stream %d task %d has empty agent", streamIdx, taskIdx)
-			}
-			if plan.Streams[streamIdx][taskIdx].Task == "" {
-				return fmt.Errorf("plan stream %d task %d has empty task", streamIdx, taskIdx)
-			}
-		}
-	}
-
-	return nil
 }
 
 func resolvePlanAgents(plan *Plan, agentMap map[string]data.AgentDefinition) error {
@@ -827,86 +805,8 @@ func (s *Supervisor) publishPlannedStep(streamIndex int, task PlanTask, state *e
 	return nil
 }
 
-func (s *Supervisor) prepareExecutionStreams(ctx context.Context, plan Plan, streamOffset int, agentMap map[string]data.AgentDefinition, agentStateMap map[string]data.Agent, forceRun bool) ([]executionStream, error) {
-	for _, stream := range plan.Streams {
-		for _, task := range stream {
-			if _, ok := agentMap[task.Agent]; !ok {
-				return nil, fmt.Errorf("agent %s not found", task.Agent)
-			}
-		}
-	}
-
-	streams := make([]executionStream, 0, len(plan.Streams))
-	for localStreamIdx, stream := range plan.Streams {
-		globalStreamIdx := streamOffset + localStreamIdx
-		execution := make(executionStream, 0, len(stream))
-		for stepIdx, task := range stream {
-			instanceKey := planStepInstanceKey(globalStreamIdx, stepIdx)
-
-			if _, found := agentStateMap[instanceKey]; !found {
-				agentRec, err := s.Repo.AddAgentToProject(ctx, s.ProjectID, task.Agent, instanceKey)
-				if err != nil {
-					return nil, fmt.Errorf("add agent %s: %w", task.Agent, err)
-				}
-				agentStateMap[instanceKey] = agentRec
-				s.logAgentCreated(task.Agent)
-				s.publishSync(agentRec, agentRec.State, "")
-			}
-
-			execution = append(execution, executionTask{
-				PlanTask:    task,
-				InstanceKey: instanceKey,
-				ForceRun:    forceRun,
-			})
-		}
-		streams = append(streams, execution)
-	}
-	return streams, nil
-}
-
 func planStepInstanceKey(streamIndex, stepIndex int) string {
 	return fmt.Sprintf("s%d:t%d", streamIndex, stepIndex)
-}
-
-func collectRequiredAgents(plan Plan) []string {
-	requiredAgents := []string{"planner", "branch-setup"}
-	seen := map[string]struct{}{
-		plannerAgentName:     {},
-		branchSetupAgentName: {},
-	}
-
-	for _, stream := range plan.Streams {
-		for _, task := range stream {
-			if _, ok := seen[task.Agent]; ok {
-				continue
-			}
-			seen[task.Agent] = struct{}{}
-			requiredAgents = append(requiredAgents, task.Agent)
-		}
-	}
-
-	return requiredAgents
-}
-
-func (s *Supervisor) executePlan(ctx context.Context, streams []executionStream, initialPrompt string, state *executionState) error {
-	g, gCtx := errgroup.WithContext(ctx)
-
-	for _, stream := range streams {
-		stream := stream
-		g.Go(func() error {
-			currentPrompt := initialPrompt
-			for _, step := range stream {
-				var err error
-				currentPrompt, err = s.executeTask(gCtx, step, currentPrompt, s.Workplace, state)
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-	}
-
-	return g.Wait()
 }
 
 func (s *Supervisor) executeTask(ctx context.Context, step executionTask, currentPrompt, workplace string, state *executionState) (string, error) {
@@ -985,14 +885,6 @@ func (s *Supervisor) executeTask(ctx context.Context, step executionTask, curren
 	return out, nil
 }
 
-func appendPublishedPlan(state *executionState, followUpPlan Plan) Plan {
-	state.planMu.Lock()
-	defer state.planMu.Unlock()
-
-	state.publishedPlan.Streams = append(state.publishedPlan.Streams, followUpPlan.Streams...)
-	return clonePlan(*state.publishedPlan)
-}
-
 func getAgentLock(state *executionState, agentName string) *sync.Mutex {
 	state.agentLocksMu.Lock()
 	defer state.agentLocksMu.Unlock()
@@ -1035,15 +927,6 @@ func buildAgentTaskPrompt(agentName, task, previousOutput string, includePreviou
 	}
 
 	return strings.Join(sections, "\n\n")
-}
-
-func canEmitFollowUpPlan(agentName string) bool {
-	switch CanonicalAgentName(agentName) {
-	case codeReviewerAgentName, testerAgentName:
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *Supervisor) validateWorkplaceGitRoot(ctx context.Context) error {
@@ -1496,55 +1379,6 @@ func extractPlanJSON(output string) string {
 	}
 
 	return rawJSON
-}
-
-func extractFollowUpPlanJSON(output string) (string, bool) {
-	jsonBlockRegex := regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\})\\s*```")
-	matches := jsonBlockRegex.FindAllStringSubmatch(output, -1)
-	var lastCandidate string
-	for _, m := range matches {
-		if len(m) < 2 {
-			continue
-		}
-		candidate := strings.TrimSpace(m[1])
-		if strings.Contains(candidate, `"streams"`) {
-			lastCandidate = candidate
-		}
-	}
-	if lastCandidate != "" {
-		return lastCandidate, true
-	}
-
-	trimmed := strings.TrimSpace(output)
-	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") && strings.Contains(trimmed, `"streams"`) {
-		return trimmed, true
-	}
-
-	return "", false
-}
-
-func parseFollowUpPlan(agentName, output string) (Plan, bool, error) {
-	if !canEmitFollowUpPlan(agentName) {
-		return Plan{}, false, nil
-	}
-
-	rawJSON, ok := extractFollowUpPlanJSON(output)
-	if !ok {
-		return Plan{}, false, nil
-	}
-
-	plan, err := parsePlanJSON(rawJSON)
-	if err != nil {
-		return Plan{}, false, err
-	}
-	if len(plan.Streams) == 0 {
-		return Plan{}, false, nil
-	}
-	if err := normalizePlan(&plan); err != nil {
-		return Plan{}, false, err
-	}
-
-	return plan, true, nil
 }
 
 func parsePlanJSON(rawJSON string) (Plan, error) {

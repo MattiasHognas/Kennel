@@ -21,8 +21,6 @@ type integrationModelOptions struct {
 	supervisorRunner  supervisorRunner
 }
 
-const maxCmdDrainSteps = 12
-
 func TestKeyboardNavigationSwitchesFocusedTables(t *testing.T) {
 	repo := newTestRepository(t)
 	storedProject, runtimeProject := newStoredProjectForModel(t, repo, "Navigation Project", "frontend-developer")
@@ -452,26 +450,6 @@ func applyMsg(t *testing.T, m *Model, msg tea.Msg) tea.Cmd {
 func sendKey(t *testing.T, m *Model, key tea.Key) tea.Cmd {
 	t.Helper()
 	return applyMsg(t, m, tea.KeyPressMsg(key))
-}
-
-func sendKeyAndDrain(t *testing.T, m *Model, key tea.Key) {
-	t.Helper()
-
-	cmd := sendKey(t, m, key)
-	for step := 0; step < maxCmdDrainSteps && cmd != nil; step++ {
-		msg := runCmdWithTimeout(t, cmd, 2*time.Second)
-		batch, ok := msg.(tea.BatchMsg)
-		if ok {
-			for _, batchCmd := range batch {
-				if batchCmd == nil {
-					continue
-				}
-				runCmdWithTimeout(t, batchCmd, 2*time.Second)
-			}
-			return
-		}
-		cmd = applyMsg(t, m, msg)
-	}
 }
 
 func pumpSupervisorUpdates(t *testing.T, m *Model, projectIndex int, maxSteps int, advance chan<- struct{}) {

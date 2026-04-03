@@ -161,10 +161,6 @@ func (m *Model) stopSelectedProject() {
 	m.refreshProjectAndSelection(projectIndex)
 }
 
-func (m *Model) completeSelectedProject() {
-	m.completeProjectAtIndex(m.selectedProjectIndex())
-}
-
 func (m *Model) completeProjectAtIndex(projectIndex int) {
 	if projectIndex < 0 || projectIndex >= len(m.projects) {
 		return
@@ -267,18 +263,6 @@ func (m *Model) stopSelectedAgent() {
 
 	m.cancelAgentRun(project, m.selectedAgentIndex())
 	agentInstance.Stop()
-	m.persistProjectAgentStates(project)
-	m.refreshProjectAndSelection(m.selectedProjectIndex())
-}
-
-func (m *Model) completeSelectedAgent() {
-	project := m.selectedProject()
-	agentInstance := m.selectedAgent()
-	if project == nil || agentInstance == nil || agentInstance.State() == workers.Completed {
-		return
-	}
-
-	agentInstance.Complete()
 	m.persistProjectAgentStates(project)
 	m.refreshProjectAndSelection(m.selectedProjectIndex())
 }
