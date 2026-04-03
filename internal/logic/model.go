@@ -109,6 +109,9 @@ type Keymap struct {
 	toggleProject key.Binding
 }
 
+type supervisorFactory func(repo Repository, eb *data.EventBus, agentsDir string, projectID int64, projectName string, workplace string) *Supervisor
+type supervisorRunner func(ctx context.Context, supervisor *Supervisor, instructions string, configuredAgents []string) error
+
 type Model struct {
 	projectTable      table.Model
 	agentTable        table.Model
@@ -124,6 +127,8 @@ type Model struct {
 	keymap            Keymap
 	repository        *data.SQLiteRepository
 	agentExecutor     AgentExecutor
+	supervisorFactory supervisorFactory
+	supervisorRunner  supervisorRunner
 	mode              viewMode
 	projectEditor     projectEditor
 }

@@ -47,7 +47,12 @@ func (m *Model) startSelectedProject() tea.Cmd {
 
 	eb := data.NewEventBus()
 	source := supervisorSource{projectIndex: projectIndex, channel: eb.Subscribe(data.SupervisorTopic), done: runDone, result: runResult}
-	sup := NewSupervisor(m.repository, eb, defaultAgentsDir(), project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
+	supervisorFactory := m.supervisorFactory
+	if supervisorFactory == nil {
+		supervisorFactory = NewSupervisor
+	}
+	sup := supervisorFactory(m.repository, eb, defaultAgentsDir(), project.Config.ProjectID, project.Config.Name, project.Config.Workplace)
+	sup.EventBus = eb
 	project.Runtime.Supervisor = sup
 	project.Runtime.Logger = sup.Logger
 	project.Runtime.SupervisorEvents = source.channel
@@ -57,9 +62,16 @@ func (m *Model) startSelectedProject() tea.Cmd {
 		configuredAgents = append(configuredAgents, agentInstance.Name())
 	}
 
+	supervisorRunner := m.supervisorRunner
+	if supervisorRunner == nil {
+		supervisorRunner = func(ctx context.Context, supervisor *Supervisor, instructions string, configuredAgents []string) error {
+			return supervisor.RunPlan(ctx, instructions, configuredAgents)
+		}
+	}
+
 	go func() {
 		defer close(runDone)
-		runResult <- sup.RunPlan(ctx, project.Config.Instructions, configuredAgents)
+		runResult <- supervisorRunner(ctx, sup, project.Config.Instructions, configuredAgents)
 		close(runResult)
 	}()
 
