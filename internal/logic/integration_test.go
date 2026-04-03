@@ -17,8 +17,8 @@ type integrationModelOptions struct {
 	repo              *data.SQLiteRepository
 	projects          []Project
 	agentNames        []string
-	supervisorFactory SupervisorFactory
-	supervisorRunner  SupervisorRunner
+	supervisorFactory supervisorFactory
+	supervisorRunner  supervisorRunner
 }
 
 const maxCmdDrainSteps = 12
@@ -193,8 +193,8 @@ func TestKeyboardSpaceStartsAndStopsProject(t *testing.T) {
 	blocked := make(chan struct{}, 1)
 
 	m, _ := newIntegrationModel(t, integrationModelOptions{
-		repo:       repo,
-		projects:   []Project{runtimeProject},
+		repo:             repo,
+		projects:         []Project{runtimeProject},
 		supervisorRunner: blockingSupervisorRunner(blocked),
 	})
 	m.projectTable.SetCursor(1)
@@ -234,8 +234,8 @@ func TestKeyboardStartAndStopProjectWithKeys(t *testing.T) {
 	blocked := make(chan struct{}, 1)
 
 	m, _ := newIntegrationModel(t, integrationModelOptions{
-		repo:       repo,
-		projects:   []Project{runtimeProject},
+		repo:             repo,
+		projects:         []Project{runtimeProject},
 		supervisorRunner: blockingSupervisorRunner(blocked),
 	})
 	m.projectTable.SetCursor(1)
@@ -505,7 +505,7 @@ func pumpSupervisorUpdates(t *testing.T, m *Model, projectIndex int, maxSteps in
 	t.Fatalf("supervisor updates exceeded %d steps", maxSteps)
 }
 
-func blockingSupervisorRunner(blocked chan<- struct{}) SupervisorRunner {
+func blockingSupervisorRunner(blocked chan<- struct{}) supervisorRunner {
 	return func(ctx context.Context, supervisor *Supervisor, instructions string, configuredAgents []string) error {
 		select {
 		case blocked <- struct{}{}:
@@ -516,7 +516,7 @@ func blockingSupervisorRunner(blocked chan<- struct{}) SupervisorRunner {
 	}
 }
 
-func planningSupervisorRunner(t *testing.T, repo *data.SQLiteRepository, storedProject data.Project, runtimeProject Project) (SupervisorRunner, chan struct{}) {
+func planningSupervisorRunner(t *testing.T, repo *data.SQLiteRepository, storedProject data.Project, runtimeProject Project) (supervisorRunner, chan struct{}) {
 	t.Helper()
 
 	advance := make(chan struct{}, 1)
