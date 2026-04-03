@@ -554,14 +554,6 @@ func (r *SQLiteRepository) ensureSchema(ctx context.Context) error {
 		return fmt.Errorf("create sqlite schema: %w", err)
 	}
 
-	if _, err := r.db.ExecContext(ctx, `UPDATE agents SET state = 'stopped' WHERE lower(state) = 'paused'`); err != nil {
-		return fmt.Errorf("migrate legacy paused states: %w", err)
-	}
-
-	if _, err := r.db.ExecContext(ctx, `UPDATE projects SET state = 'stopped' WHERE lower(state) = 'paused' OR trim(state) = ''`); err != nil {
-		return fmt.Errorf("migrate legacy project states: %w", err)
-	}
-
 	return nil
 }
 
