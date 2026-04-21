@@ -117,7 +117,7 @@ func TestRequestPermissionWithoutAllowOnceReturnsCancelled(t *testing.T) {
 
 	resp, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
 		SessionId: "session",
-		ToolCall:  acpsdk.RequestPermissionToolCall{ToolCallId: "tool-call"},
+		ToolCall:  acpsdk.ToolCallUpdate{ToolCallId: "tool-call"},
 		Options: []acpsdk.PermissionOption{{
 			OptionId: "reject",
 			Name:     "Reject",
@@ -141,7 +141,7 @@ func TestRequestPermissionReturnsCancelledWhenACPToolIsDisabled(t *testing.T) {
 
 	resp, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
 		SessionId: "session",
-		ToolCall:  acpsdk.RequestPermissionToolCall{ToolCallId: "tool-call"},
+		ToolCall:  acpsdk.ToolCallUpdate{ToolCallId: "tool-call"},
 		Options: []acpsdk.PermissionOption{{
 			OptionId: "allow",
 			Name:     "Allow once",
@@ -168,7 +168,7 @@ func TestRequestPermissionDisabledDoesNotLogAccessDeniedError(t *testing.T) {
 
 	resp, err := client.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{
 		SessionId: "session",
-		ToolCall:  acpsdk.RequestPermissionToolCall{ToolCallId: "tool-call"},
+		ToolCall:  acpsdk.ToolCallUpdate{ToolCallId: "tool-call"},
 		Options: []acpsdk.PermissionOption{{
 			OptionId: "allow",
 			Name:     "Allow once",
@@ -493,8 +493,8 @@ func TestWaitForTerminalExitRespectsContext(t *testing.T) {
 		t.Fatal("WaitForTerminalExit returned nil error, want context deadline exceeded")
 	}
 
-	if _, err := client.KillTerminalCommand(context.Background(), acpsdk.KillTerminalCommandRequest{TerminalId: created.TerminalId}); err != nil {
-		t.Fatalf("KillTerminalCommand returned error: %v", err)
+	if _, err := client.KillTerminal(context.Background(), acpsdk.KillTerminalRequest{TerminalId: created.TerminalId}); err != nil {
+		t.Fatalf("KillTerminal returned error: %v", err)
 	}
 }
 
