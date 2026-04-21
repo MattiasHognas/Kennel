@@ -289,7 +289,7 @@ func buildMCPServers(configs []data.MCPServer) ([]acp.McpServer, error) {
 			})
 		case "http":
 			servers = append(servers, acp.McpServer{
-				Http: &acp.McpServerHttp{
+				Http: &acp.McpServerHttpInline{
 					Name:    config.Name,
 					Type:    "http",
 					Url:     config.URL,
@@ -298,7 +298,7 @@ func buildMCPServers(configs []data.MCPServer) ([]acp.McpServer, error) {
 			})
 		case "sse":
 			servers = append(servers, acp.McpServer{
-				Sse: &acp.McpServerSse{
+				Sse: &acp.McpServerSseInline{
 					Name:    config.Name,
 					Type:    "sse",
 					Url:     config.URL,
@@ -628,19 +628,19 @@ func (c *localClient) CreateTerminal(ctx context.Context, params acp.CreateTermi
 	return acp.CreateTerminalResponse{TerminalId: termID}, nil
 }
 
-func (c *localClient) KillTerminalCommand(ctx context.Context, params acp.KillTerminalCommandRequest) (acp.KillTerminalCommandResponse, error) {
+func (c *localClient) KillTerminal(ctx context.Context, params acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
 	err := params.Validate()
 	if err != nil {
-		return acp.KillTerminalCommandResponse{}, c.failWrap("validation failed", err)
+		return acp.KillTerminalResponse{}, c.failWrap("validation failed", err)
 	}
 	if err := c.checkACPToolPermission(acpToolKillTerminal); err != nil {
-		return acp.KillTerminalCommandResponse{}, c.failWrap("access denied", err)
+		return acp.KillTerminalResponse{}, c.failWrap("access denied", err)
 	}
 	c.terminalsMu.Lock()
 	state, exists := c.terminals[params.TerminalId]
 	c.terminalsMu.Unlock()
 	if !exists {
-		return acp.KillTerminalCommandResponse{}, c.fail("invalid terminal ID")
+		return acp.KillTerminalResponse{}, c.fail("invalid terminal ID")
 	}
 	if state.cmd.Process != nil {
 		_ = state.cmd.Process.Kill()
@@ -648,7 +648,7 @@ func (c *localClient) KillTerminalCommand(ctx context.Context, params acp.KillTe
 	c.terminalsMu.Lock()
 	delete(c.terminals, params.TerminalId)
 	c.terminalsMu.Unlock()
-	return acp.KillTerminalCommandResponse{}, nil
+	return acp.KillTerminalResponse{}, nil
 }
 
 func (c *localClient) TerminalOutput(ctx context.Context, params acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
