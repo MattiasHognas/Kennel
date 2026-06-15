@@ -3,7 +3,7 @@ module MattiasHognas/Kennel
 go 1.26.1
 
 require (
-	charm.land/lipgloss/v2 v2.0.3
+	charm.land/lipgloss/v2 v2.0.4
 	github.com/coder/acp-go-sdk v0.13.5
 	golang.org/x/sync v0.21.0
 	modernc.org/sqlite v1.52.0
