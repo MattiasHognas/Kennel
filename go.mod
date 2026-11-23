@@ -4,7 +4,7 @@ go 1.26.7
 
 require (
 	charm.land/lipgloss/v2 v2.1.0
-	github.com/coder/acp-go-sdk v0.13.5
+	github.com/coder/acp-go-sdk v0.20.0
 	golang.org/x/sync v0.25.0
 	modernc.org/sqlite v1.62.0
 )
